@@ -1,0 +1,61 @@
+{
+    "ZVSCORE": {
+        "summary": "Returns the vector score of a member in a ZVSET.",
+        "complexity": "O(1)",
+        "group": "sorted_set",
+        "since": "9.2.0",
+        "arity": 3,
+        "function": "zvscoreCommand",
+        "command_flags": [
+            "READONLY",
+            "FAST"
+        ],
+        "acl_categories": [
+            "FAST",
+            "READ",
+            "SORTEDSET"
+        ],
+        "key_specs": [
+            {
+                "flags": [
+                    "RO",
+                    "ACCESS"
+                ],
+                "begin_search": {
+                    "index": {
+                        "pos": 1
+                    }
+                },
+                "find_keys": {
+                    "range": {
+                        "lastkey": 0,
+                        "step": 1,
+                        "limit": 0
+                    }
+                }
+            }
+        ],
+        "reply_schema": {
+            "oneOf": [
+                {
+                    "type": "string",
+                    "description": "Vector score as 'v0#v1#...'."
+                },
+                {
+                    "type": "null"
+                }
+            ]
+        },
+        "arguments": [
+            {
+                "name": "key",
+                "type": "key",
+                "key_spec_index": 0
+            },
+            {
+                "name": "member",
+                "type": "string"
+            }
+        ]
+    }
+}

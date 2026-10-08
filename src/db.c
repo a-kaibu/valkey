@@ -1160,7 +1160,7 @@ int parseScanCursorOrReply(client *c, sds buf, unsigned long long *cursor) {
 }
 
 char *obj_type_name[OBJ_TYPE_MAX] = {"string", "list", "set", "zset", "hash", NULL, /* module type is special */
-                                     "stream", "pathhash"};
+                                     "stream", "pathhash", "zvset"};
 
 /* Helper function to get type from a string in scan commands */
 long long getObjectTypeByName(char *name) {
@@ -1731,6 +1731,7 @@ void copyCommand(client *c) {
     case OBJ_HASH: newobj = hashTypeDup(o); break;
     case OBJ_STREAM: newobj = streamDup(o); break;
     case OBJ_PATH_HASH: newobj = pathHashTypeDup(o); break;
+    case OBJ_ZVSET: newobj = zvsetDup(o); break;
     case OBJ_MODULE:
         newobj = moduleTypeDupOrReply(c, key, newkey, dst->id, o);
         if (!newobj) return;

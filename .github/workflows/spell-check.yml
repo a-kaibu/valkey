@@ -7,6 +7,9 @@ name: Spellcheck
 
 on:
   push:
+    branches-ignore:
+      # PoC branch: skip non-test checks (use zv-poc.yml instead)
+      - 'poc/zv-multiscore'
   pull_request:
 
 concurrency:

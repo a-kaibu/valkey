@@ -7,6 +7,9 @@ permissions:
 # where each PR needs to be compared against the coverage of the head commit
 on:
   push:
+    branches-ignore:
+      # PoC branch: skip non-test checks (use zv-poc.yml instead)
+      - 'poc/zv-multiscore'
     paths-ignore:
       - '**/*.md'
       - '**/00-RELEASENOTES'

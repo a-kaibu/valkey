@@ -1,0 +1,89 @@
+{
+    "ZVADD": {
+        "summary": "Adds one or more vector-scored members to a ZVSET. Creates the key if it doesn't exist.",
+        "complexity": "O(log(N)) for each item added, where N is the number of elements.",
+        "group": "sorted_set",
+        "since": "9.2.0",
+        "arity": -4,
+        "function": "zvaddCommand",
+        "command_flags": [
+            "WRITE",
+            "DENYOOM",
+            "FAST"
+        ],
+        "acl_categories": [
+            "FAST",
+            "SORTEDSET",
+            "WRITE"
+        ],
+        "key_specs": [
+            {
+                "flags": [
+                    "RW",
+                    "UPDATE"
+                ],
+                "begin_search": {
+                    "index": {
+                        "pos": 1
+                    }
+                },
+                "find_keys": {
+                    "range": {
+                        "lastkey": 0,
+                        "step": 1,
+                        "limit": 0
+                    }
+                }
+            }
+        ],
+        "reply_schema": {
+            "type": "integer",
+            "description": "The number of new members (or new+updated with CH)."
+        },
+        "arguments": [
+            {
+                "name": "key",
+                "type": "key",
+                "key_spec_index": 0
+            },
+            {
+                "name": "condition",
+                "type": "oneof",
+                "optional": true,
+                "arguments": [
+                    {
+                        "name": "nx",
+                        "type": "pure-token",
+                        "token": "NX"
+                    },
+                    {
+                        "name": "xx",
+                        "type": "pure-token",
+                        "token": "XX"
+                    }
+                ]
+            },
+            {
+                "name": "change",
+                "token": "CH",
+                "type": "pure-token",
+                "optional": true
+            },
+            {
+                "name": "data",
+                "type": "block",
+                "multiple": true,
+                "arguments": [
+                    {
+                        "name": "score",
+                        "type": "string"
+                    },
+                    {
+                        "name": "member",
+                        "type": "string"
+                    }
+                ]
+            }
+        ]
+    }
+}

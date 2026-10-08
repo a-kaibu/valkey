@@ -2,6 +2,9 @@ name: Reply-schemas linter
 
 on:
   push:
+    branches-ignore:
+      # PoC branch: skip non-test checks (use zv-poc.yml instead)
+      - 'poc/zv-multiscore'
     paths:
       - 'src/commands/*.json'
   pull_request:

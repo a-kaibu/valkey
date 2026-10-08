@@ -31,6 +31,8 @@
 #include "hashtable.h"
 #include "server.h"
 #include "ordered_index.h"
+#include "zvset.h"
+#include "fbtree.h"
 #include "serverassert.h"
 #include "functions.h"
 #include "intset.h" /* Compact integer set structure */
@@ -683,6 +685,24 @@ robj *createZsetListpackObject(void) {
     return o;
 }
 
+robj *createZvsetObject(uint8_t dimensions) {
+    zvset *zs = zmalloc(sizeof(*zs));
+    robj *o;
+
+    zs->ht = hashtableCreate(&zvsetHashtableType);
+    zs->tree = fbtreeCreate();
+    zs->dimensions = dimensions;
+    o = createObject(OBJ_ZVSET, zs);
+    objectSetEncoding(o, OBJ_ENCODING_BTREE);
+    return o;
+}
+
+unsigned long zvsetObjectLength(const robj *zobj) {
+    serverAssert(objectGetType(zobj) == OBJ_ZVSET);
+    const zvset *zs = objectGetVal(zobj);
+    return fbtreeLength((fbtreeIndex *)zs->tree);
+}
+
 robj *createStreamObject(void) {
     stream *s = streamNew();
     robj *o = createObject(OBJ_STREAM, s);
@@ -736,6 +756,20 @@ void freeZsetObject(robj *o) {
     }
 }
 
+void freeZvsetObject(robj *o) {
+    zvset *zs;
+    switch (objectGetEncoding(o)) {
+    case OBJ_ENCODING_BTREE:
+        zs = objectGetVal(o);
+        /* hashtable holds non-owning pointers; fbtree owns packed items. */
+        hashtableRelease(zs->ht);
+        fbtreeFree(zs->tree);
+        zfree(zs);
+        break;
+    default: serverPanic("Unknown zvset encoding");
+    }
+}
+
 void freeHashObject(robj *o) {
     switch (objectGetEncoding(o)) {
     case OBJ_ENCODING_HASHTABLE:
@@ -781,6 +815,7 @@ void decrRefCount(robj *o) {
             case OBJ_MODULE: freeModuleObject(o); break;
             case OBJ_STREAM: freeStreamObject(o); break;
             case OBJ_PATH_HASH: freePathHashObject(o); break;
+            case OBJ_ZVSET: freeZvsetObject(o); break;
             default: serverPanic("Unknown object type"); break;
             }
         }
@@ -882,6 +917,21 @@ void dismissZsetObject(robj *o, size_t size_hint) {
 }
 
 /* See dismissObject() */
+void dismissZvsetObject(robj *o, size_t size_hint) {
+    if (objectGetEncoding(o) == OBJ_ENCODING_BTREE) {
+        zvset *zs = objectGetVal(o);
+        unsigned long len = fbtreeLength(zs->tree);
+        serverAssert(len != 0);
+        if (size_hint / len >= server.page_size) {
+            fbtreeDismissMemory(zs->tree);
+        }
+        dismissHashtable(zs->ht);
+    } else {
+        serverPanic("Unknown zvset encoding type");
+    }
+}
+
+/* See dismissObject() */
 void dismissHashObject(robj *o, size_t size_hint) {
     if (objectGetEncoding(o) == OBJ_ENCODING_HASHTABLE) {
         hashtable *ht = objectGetVal(o);
@@ -954,6 +1004,7 @@ void dismissObject(robj *o, size_t size_hint) {
     case OBJ_ZSET: dismissZsetObject(o, size_hint); break;
     case OBJ_HASH: dismissHashObject(o, size_hint); break;
     case OBJ_STREAM: dismissStreamObject(o, size_hint); break;
+    case OBJ_ZVSET: dismissZvsetObject(o, size_hint); break;
     default: break;
     }
 #else
@@ -1400,6 +1451,23 @@ size_t objectComputeSize(robj *key, robj *o, size_t sample_size, int dbid) {
             if (samples) asize += (double)elesize / samples * hashtableSize(zs->ht);
         } else {
             serverPanic("Unknown sorted set encoding");
+        }
+    } else if (objectGetType(o) == OBJ_ZVSET) {
+        if (objectGetEncoding(o) == OBJ_ENCODING_BTREE) {
+            zvset *zs = objectGetVal(o);
+            hashtableIterator iter;
+            hashtableInitIterator(&iter, zs->ht, 0);
+            void *next;
+
+            asize += sizeof(zvset) + fbtreeEstimateStructureMemory(zs->tree) + hashtableMemUsage(zs->ht);
+            while (hashtableNext(&iter, &next) && samples < sample_size) {
+                elesize += sdsAllocSize((sds)next);
+                samples++;
+            }
+            hashtableCleanupIterator(&iter);
+            if (samples) asize += (double)elesize / samples * hashtableSize(zs->ht);
+        } else {
+            serverPanic("Unknown zvset encoding");
         }
     } else if (objectGetType(o) == OBJ_HASH) {
         if (objectGetEncoding(o) == OBJ_ENCODING_LISTPACK) {
