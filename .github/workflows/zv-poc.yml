@@ -38,7 +38,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout Valkey
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build
         run: |
           sudo apt-get install -y tcl8.6 tclx
@@ -53,7 +53,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Checkout Valkey
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build
         run: make -j"$(nproc)"
       - name: Run ZV benchmark
@@ -73,7 +73,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Upload results
         if: always()
-        uses: actions/upload-artifact@b7c566a7725b0dfc5864424b1174f33f38a3a76ed # v6.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: zv-bench-N${{ env.BENCH_N }}
           path: |
