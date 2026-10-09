@@ -128,6 +128,118 @@ sds zvScoreFormat(const zvScore *score) {
     return out;
 }
 
+/* --- Score range bounds (BYSCORE) --- */
+
+int zvParseScoreBound(const char *str, size_t len, uint8_t dims, zvScoreBound *bound) {
+    bound->unbounded = 0;
+    bound->exclusive = 0;
+    bound->score = NULL;
+    if (len == 1 && (str[0] == '-' || str[0] == '+')) {
+        bound->unbounded = 1;
+        return C_OK;
+    }
+    if (len > 1 && str[0] == '(') {
+        bound->exclusive = 1;
+        str++;
+        len--;
+    }
+    zvScore *score = zvScoreParse(str, len);
+    if (score == NULL) return C_ERR;
+    if (score->len != dims) {
+        zvScoreFree(score);
+        return C_ERR;
+    }
+    bound->score = score;
+    return C_OK;
+}
+
+void zvFreeScoreBound(zvScoreBound *bound) {
+    if (bound->score) zvScoreFree(bound->score);
+    bound->score = NULL;
+}
+
+sds zvBuildScorePrefix(const zvScore *score) {
+    size_t total = 1 + (size_t)score->len * 8;
+    sds prefix = sdsnewlen(NULL, total);
+    prefix[0] = (char)score->len;
+    for (int i = 0; i < score->len; i++) {
+        uint64_t sortable = zvScoreToSortable(score->values[i]);
+        memcpy(prefix + 1 + (size_t)i * 8, &sortable, 8);
+    }
+    return prefix;
+}
+
+sds zvBoundSuccessor(const_sds bound) {
+    size_t len = sdslen(bound);
+    sds succ = sdsdup(bound);
+    for (size_t i = len; i > 0; i--) {
+        unsigned char b = (unsigned char)succ[i - 1];
+        if (b != 0xFF) {
+            succ[i - 1] = (char)(b + 1);
+            return succ;
+        }
+    }
+    /* All 0xFF: no successor in byte space. Unreachable for encoded
+     * score prefixes (NaN is rejected, dims <= 255 always leaves a
+     * non-0xFF byte via the dims byte or score encoding). */
+    sdsfree(succ);
+    return NULL;
+}
+
+void zvScoreRanks(zvset *zs, const_sds lower, const_sds upper, unsigned long *lo, unsigned long *hi) {
+    unsigned long len = fbtreeLength(zs->tree);
+    fbtreeIterator it;
+    if (lower != NULL) {
+        fbtreeInitIterator(&it, zs->tree);
+        long rank = fbtreeSeekToValue(lower, &it);
+        *lo = rank < 0 ? 0 : (unsigned long)rank;
+    } else {
+        *lo = 0;
+    }
+    if (upper != NULL) {
+        fbtreeInitIterator(&it, zs->tree);
+        long rank = fbtreeSeekToValue(upper, &it);
+        *hi = rank < 0 ? 0 : (unsigned long)rank;
+    } else {
+        *hi = len;
+    }
+    if (*lo > len) *lo = len;
+    if (*hi > len) *hi = len;
+    if (*lo > *hi) *lo = *hi;
+}
+
+void zvIterateRange(zvset *zs, unsigned long lo, unsigned long hi, int reverse, long offset, long count,
+                    zvRangeEmit emit, void *ctx) {
+    if (lo >= hi) return;
+    if (offset < 0) offset = 0;
+    fbtreeIterator it;
+    fbtreeInitIterator(&it, zs->tree);
+    if (!reverse) {
+        unsigned long start = lo + (unsigned long)offset;
+        if (start >= hi) return;
+        unsigned long n = hi - start;
+        if (count >= 0 && n > (unsigned long)count) n = (unsigned long)count;
+        if (start > 0) fbtreeSeekToRank(&it, start);
+        for (unsigned long i = 0; i < n; i++) {
+            const_sds item = fbtreeNext(&it);
+            if (item == NULL) break;
+            emit(ctx, item);
+        }
+    } else {
+        long start = (long)hi - 1 - offset;
+        if (start < (long)lo) return;
+        unsigned long n = (unsigned long)(start - (long)lo) + 1;
+        if (count >= 0 && n > (unsigned long)count) n = (unsigned long)count;
+        /* After SeekToRank(r), Prev() yields rank r-1. */
+        fbtreeSeekToRank(&it, (unsigned long)start + 1);
+        for (unsigned long i = 0; i < n; i++) {
+            const_sds item = fbtreePrev(&it);
+            if (item == NULL) break;
+            emit(ctx, item);
+        }
+    }
+}
+
 /* Create packed fbtree item: [dims:u8][sortable...][member]. */
 sds zvItemCreate(const zvScore *score, const char *member, size_t member_len) {
     size_t total = 1 + (size_t)score->len * 8 + member_len;

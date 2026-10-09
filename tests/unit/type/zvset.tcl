@@ -185,6 +185,70 @@ start_server {tags {"zvset"}} {
         assert_equal {d 4} [r zvrange x -1 -1 withscores]
     }
 
+    test "ZVRANGE BYSCORE inclusive exclusive unbounded" {
+        zv_create x 1#0 a 1#1 b 1#1 c 1#2 d 2#0 e
+        assert_equal {b c d} [r zvrange x 1#1 1#2 byscore]
+        assert_equal {d} [r zvrange x (1#1 1#2 byscore]
+        assert_equal {b c} [r zvrange x 1#1 (1#2 byscore]
+        assert_equal {} [r zvrange x (1#1 (1#1 byscore]
+        assert_equal {a b c d e} [r zvrange x - + byscore]
+        assert_equal {d e} [r zvrange x (1#1 + byscore]
+        assert_equal {a b c} [r zvrange x - 1#1 byscore]
+        # reversed bounds are empty
+        assert_equal {} [r zvrange x 2#0 1#0 byscore]
+        # bad bounds and dimension mismatch
+        assert_error "*invalid vector*" {r zvrange x bad 1#1 byscore}
+        assert_error "*invalid vector*" {r zvrange x 1 1#1 byscore}
+        assert_equal {} [r zvrange nokey - + byscore]
+        # empty member, NUL byte and 0xff members at the boundary
+        set m0 ""
+        set m1 "a\x00b"
+        set m2 "a\xffc"
+        r del y
+        r zvadd y 1#2 $m0
+        r zvadd y 1#2 $m1
+        r zvadd y 1#2 $m2
+        assert_equal [list $m0 $m1 $m2] [r zvrange y 1#2 1#2 byscore]
+        assert_equal 3 [r zvcount y 1#2 1#2]
+    }
+
+    test "ZVRANGE REV and LIMIT" {
+        zv_create x 1 a 2 b 3 c 4 d
+        assert_equal {d c b a} [r zvrange x 0 -1 rev]
+        assert_equal {c b} [r zvrange x 1 2 rev]
+        assert_equal {d c b a} [r zvrange x 4 1 byscore rev]
+        assert_equal {c b} [r zvrange x 4 1 byscore rev limit 1 2]
+        assert_equal {b c} [r zvrange x - + byscore limit 1 2]
+        assert_equal {b c d} [r zvrange x - + byscore limit 1 -1]
+        assert_equal {} [r zvrange x - + byscore limit 0 0]
+        assert_equal {} [r zvrange x - + byscore limit 10 5]
+        assert_equal {a 1 b 2} [r zvrange x - + byscore limit 0 2 withscores]
+        assert_error "*LIMIT*" {r zvrange x 0 -1 limit 0 2}
+        assert_error "*non-negative*" {r zvrange x - + byscore limit -1 2}
+    }
+
+    test "ZVCOUNT" {
+        zv_create x 1#0 a 1#1 b 1#1 c 1#2 d 2#0 e
+        assert_equal 3 [r zvcount x 1#1 1#2]
+        assert_equal 1 [r zvcount x (1#1 1#2]
+        assert_equal 5 [r zvcount x - +]
+        assert_equal 0 [r zvcount x 2#0 1#0]
+        assert_equal 0 [r zvcount nokey - +]
+        assert_error "*invalid vector*" {r zvcount x 1 2}
+    }
+
+    test "ZVREVRANGE and BYSCORE wrappers" {
+        zv_create x 1 a 2 b 3 c
+        assert_equal {c b a} [r zvrevrange x 0 -1]
+        assert_equal {c b} [r zvrevrange x 1 2]
+        assert_equal {b 2 a 1} [r zvrevrange x 0 1 withscores]
+        zv_create y 1#0 a 1#1 b 2#0 c
+        assert_equal {a b} [r zvrangebyscore y 1#0 1#1]
+        assert_equal {b a} [r zvrevrangebyscore y 1#1 1#0]
+        assert_equal {c b} [r zvrevrangebyscore y 2#0 1#0 limit 0 2]
+        assert_equal {b 1#1} [r zvrangebyscore y - + limit 1 1 withscores]
+    }
+
     test "ZVREM existing/missing/last item deletes key" {
         zv_create x 1 a 2 b
         assert_equal 1 [r zvrem x a]
@@ -313,8 +377,7 @@ start_server {tags {"zvset"}} {
         assert_equal 0 [r exists ydim256]
     }
 
-    test "ZV long common prefix orders by last dimension" {
-        zv_create x 5#5#5#5#5#5#5#30 m3 5#5#5#5#5#5#5#10 m1 5#5#5#5#5#5#5#20 m2
+    test "ZV long common prefix orders by last dimension" {        zv_create x 5#5#5#5#5#5#5#30 m3 5#5#5#5#5#5#5#10 m1 5#5#5#5#5#5#5#20 m2
         assert_equal {m1 m2 m3} [r zvrange x 0 -1]
         assert_equal 0 [r zvrank x m1]
         assert_equal 2 [r zvrank x m3]

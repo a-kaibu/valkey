@@ -67,6 +67,33 @@ int zvScoreIncrement(zvScore *result, const zvScore *base, const zvScore *delta)
 /* Format a parsed vector as "v0#v1#...". Caller must sdsfree(). */
 sds zvScoreFormat(const zvScore *score);
 
+/* BYSCORE bound: "-", "+", "(v0#v1" (exclusive) or "v0#v1" (inclusive). */
+typedef struct zvScoreBound {
+    int unbounded;
+    int exclusive;
+    zvScore *score; /* NULL when unbounded */
+} zvScoreBound;
+
+/* Parse one bound token against the key's dimensions. */
+int zvParseScoreBound(const char *str, size_t len, uint8_t dims, zvScoreBound *bound);
+void zvFreeScoreBound(zvScoreBound *bound);
+
+/* P(s): score prefix [dims:u8][sortable...] without member. */
+sds zvBuildScorePrefix(const zvScore *score);
+/* Byte successor with carry (encoded-prefix space only, never decoded).
+ * Returns NULL when the input is all 0xFF (unreachable for encoded
+ * scores, since NaN is rejected). */
+sds zvBoundSuccessor(const_sds bound);
+
+/* Resolve half-open [lo,hi) ranks for [lower,upper); NULL = unbounded. */
+void zvScoreRanks(zvset *zs, const_sds lower, const_sds upper, unsigned long *lo, unsigned long *hi);
+
+/* Range iteration over [lo,hi): reverse selects direction, offset/count
+ * apply LIMIT (count < 0 means all). emit is called per item. */
+typedef void (*zvRangeEmit)(void *ctx, const_sds item);
+void zvIterateRange(zvset *zs, unsigned long lo, unsigned long hi, int reverse, long offset, long count,
+                    zvRangeEmit emit, void *ctx);
+
 /* double <-> sortable conversion (same rule as ordered_index.c). */
 uint64_t zvScoreToSortable(double score);
 double zvSortableToScore(uint64_t sortable);

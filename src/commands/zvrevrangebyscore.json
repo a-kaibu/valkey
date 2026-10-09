@@ -1,11 +1,11 @@
 {
-    "ZVRANGE": {
-        "summary": "Returns members in a ZVSET range by index, vector score, or member name.",
+    "ZVREVRANGEBYSCORE": {
+        "summary": "Returns members in a ZVSET vector score range, ordered from high to low.",
         "complexity": "O(log(N)+M)",
         "group": "sorted_set",
         "since": "9.2.0",
         "arity": -4,
-        "function": "zvrangeCommand",
+        "function": "zvrevrangebyscoreCommand",
         "command_flags": [
             "READONLY"
         ],
@@ -44,33 +44,16 @@
                 "key_spec_index": 0
             },
             {
-                "name": "start",
-                "type": "integer"
+                "name": "max",
+                "type": "string"
             },
             {
-                "name": "stop",
-                "type": "integer"
+                "name": "min",
+                "type": "string"
             },
             {
-                "name": "sortby",
-                "type": "oneof",
-                "optional": true,
-                "arguments": [
-                    {
-                        "name": "byscore",
-                        "token": "BYSCORE",
-                        "type": "pure-token"
-                    },
-                    {
-                        "name": "bylex",
-                        "token": "BYLEX",
-                        "type": "pure-token"
-                    }
-                ]
-            },
-            {
-                "name": "rev",
-                "token": "REV",
+                "name": "withscores",
+                "token": "WITHSCORES",
                 "type": "pure-token",
                 "optional": true
             },
@@ -93,12 +76,6 @@
                         "type": "integer"
                     }
                 ]
-            },
-            {
-                "name": "withscores",
-                "token": "WITHSCORES",
-                "type": "pure-token",
-                "optional": true
             }
         ]
     }
