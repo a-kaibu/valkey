@@ -237,8 +237,7 @@ start_server {tags {"zvset"}} {
         assert_error "*invalid vector*" {r zvcount x 1 2}
     }
 
-    test "ZVREVRANGE and BYSCORE wrappers" {
-        zv_create x 1 a 2 b 3 c
+    test "ZVREVRANGE and BYSCORE wrappers" {        zv_create x 1 a 2 b 3 c
         assert_equal {c b a} [r zvrevrange x 0 -1]
         assert_equal {c b} [r zvrevrange x 1 2]
         assert_equal {b 2 a 1} [r zvrevrange x 0 1 withscores]
@@ -247,6 +246,92 @@ start_server {tags {"zvset"}} {
         assert_equal {b a} [r zvrevrangebyscore y 1#1 1#0]
         assert_equal {c b} [r zvrevrangebyscore y 2#0 1#0 limit 0 2]
         assert_equal {b 1#1} [r zvrangebyscore y - + limit 1 1 withscores]
+    }
+
+    test "ZVRANGE BYLEX uniform keys" {
+        zv_create u 1#1 a 1#1 b 1#1 c 1#1 d
+        assert_equal {a b c d} [r zvrange u - + bylex]
+        assert_equal {b c d} [r zvrange u {[b} {[d} bylex]
+        assert_equal {c d} [r zvrange u {(b} + bylex]
+        assert_equal {d c b} [r zvrange u {[d} {[b} bylex rev]
+        assert_equal {c} [r zvrange u - + bylex limit 2 1]
+        assert_equal {b 1#1 c 1#1} [r zvrange u - + bylex limit 1 2 withscores]
+        assert_equal {a b} [r zvrangebylex u {[a} {[b}]
+        assert_equal {d c b} [r zvrevrangebylex u {[d} {[b}]
+        assert_equal 2 [r zvlexcount u {[b} {(d}]
+        assert_equal 4 [r zvlexcount u - +]
+    }
+
+    test "ZVRANGE BYLEX rejects mixed vectors" {
+        zv_create v 1#1 x 2#2 y
+        assert_error "*same vector*" {r zvrange v {[a} {[z} bylex}
+        assert_error "*same vector*" {r zvrangebylex v - +}
+        assert_error "*same vector*" {r zvrevrangebylex v + -}
+        assert_error "*same vector*" {r zvlexcount v - +}
+        assert_error "*same vector*" {r zvremrangebylex v {[a} {[z}}
+        assert_equal {} [r zvrange nokey {[a} {[z} bylex]
+    }
+
+    test "ZVRANGESTORE" {
+        zv_create src 1 a 2 b 3 c 4 d
+        assert_equal 2 [r zvrangestore rdst src 1 2]
+        assert_equal {b c} [r zvrange rdst 0 -1]
+        assert_equal {zvset} [r type rdst]
+        # byscore + rev + limit (stored set reads back in vector order)
+        assert_equal 2 [r zvrangestore rdst2 src 4 1 byscore rev limit 0 2]
+        assert_equal {c d} [r zvrange rdst2 0 -1]
+        # bylex on uniform source
+        zv_create srclex 1#1 a 1#1 b 1#1 c
+        assert_equal 2 [r zvrangestore rdst3 srclex {[b} {[c} bylex]
+        assert_equal {b c} [r zvrange rdst3 0 -1]
+        # src == dst works
+        assert_equal 2 [r zvrangestore src src 1 2]
+        assert_equal {b c} [r zvrange src 0 -1]
+        # empty result deletes destination
+        r zvadd keep 1#1 z
+        assert_equal 0 [r zvrangestore keep src 5 9]
+        assert_equal 0 [r exists keep]
+        # missing source deletes destination, returns 0
+        r zvadd keep2 1#1 z
+        assert_equal 0 [r zvrangestore keep2 nosuchkey 0 -1]
+        assert_equal 0 [r exists keep2]
+        # dimension change replaces wholesale
+        r zvadd other 1#1#1 q
+        assert_equal 2 [r zvrangestore other src 0 1]
+        assert_equal {b c} [r zvrange other 0 -1]
+        assert_equal {2} [r zvscore other b]
+    }
+
+    test "ZVREMRANGEBYRANK" {
+        zv_create x 1 a 2 b 3 c 4 d 5 e
+        assert_equal 2 [r zvremrangebyrank x 0 1]
+        assert_equal {c d e} [r zvrange x 0 -1]
+        assert_equal 1 [r zvremrangebyrank x -1 -1]
+        assert_equal {c d} [r zvrange x 0 -1]
+        assert_equal 0 [r zvremrangebyrank x 5 9]
+        assert_equal 0 [r zvremrangebyrank nokey 0 -1]
+        # deleting everything removes the key
+        assert_equal 2 [r zvremrangebyrank x 0 -1]
+        assert_equal 0 [r exists x]
+    }
+
+    test "ZVREMRANGEBYSCORE" {
+        zv_create x 1#0 a 1#1 b 1#1 c 1#2 d 2#0 e
+        assert_equal 2 [r zvremrangebyscore x 1#1 (1#2]
+        assert_equal {a d e} [r zvrange x 0 -1]
+        assert_equal 3 [r zvremrangebyscore x - +]
+        assert_equal 0 [r exists x]
+        zv_create x 1 a 2 b
+        assert_equal 0 [r zvremrangebyscore x 2 1]
+        assert_error "*invalid vector*" {r zvremrangebyscore x bad -}
+    }
+
+    test "ZVREMRANGEBYLEX" {
+        zv_create x 1#1 a 1#1 b 1#1 c 1#1 d
+        assert_equal 2 [r zvremrangebylex x {[a} {[b}]
+        assert_equal {c d} [r zvrange x 0 -1]
+        assert_equal 2 [r zvremrangebylex x - +]
+        assert_equal 0 [r exists x]
     }
 
     test "ZVREM existing/missing/last item deletes key" {

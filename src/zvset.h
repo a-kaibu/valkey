@@ -88,6 +88,24 @@ sds zvBoundSuccessor(const_sds bound);
 /* Resolve half-open [lo,hi) ranks for [lower,upper); NULL = unbounded. */
 void zvScoreRanks(zvset *zs, const_sds lower, const_sds upper, unsigned long *lo, unsigned long *hi);
 
+/* BYLEX bound: "-", "+", "[member" (inclusive) or "(member" (exclusive). */
+typedef struct zvLexBound {
+    int unbounded;
+    int exclusive;
+    sds member; /* NULL when unbounded */
+} zvLexBound;
+
+int zvParseLexBound(const char *str, size_t len, zvLexBound *bound);
+void zvFreeLexBound(zvLexBound *bound);
+/* sdscmp-style member comparison. */
+int zvLexMemberCompare(const char *a, size_t alen, const char *b, size_t blen);
+/* 1 when the key holds 0/1 items or every item shares the same score
+ * prefix (then tree order equals member order). */
+int zvsetUniformVector(zvset *zs);
+/* Build a seek key P+member from the shared score prefix. The key must
+ * be non-empty and uniform. Caller frees the result. */
+sds zvLexSeekKey(zvset *zs, const char *member, size_t member_len);
+
 /* Range iteration over [lo,hi): reverse selects direction, offset/count
  * apply LIMIT (count < 0 means all). emit is called per item. */
 typedef void (*zvRangeEmit)(void *ctx, const_sds item);

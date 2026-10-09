@@ -1,0 +1,124 @@
+{
+    "ZVRANGESTORE": {
+        "summary": "Stores a ZVSET range into a destination key.",
+        "complexity": "O(log(N)+M)",
+        "group": "sorted_set",
+        "since": "9.2.0",
+        "arity": -5,
+        "function": "zvrangestoreCommand",
+        "command_flags": [
+            "WRITE",
+            "DENYOOM"
+        ],
+        "acl_categories": [
+            "SORTEDSET",
+            "SLOW",
+            "WRITE"
+        ],
+        "key_specs": [
+            {
+                "flags": [
+                    "OW",
+                    "UPDATE"
+                ],
+                "begin_search": {
+                    "index": {
+                        "pos": 1
+                    }
+                },
+                "find_keys": {
+                    "range": {
+                        "lastkey": 0,
+                        "step": 1,
+                        "limit": 0
+                    }
+                }
+            },
+            {
+                "flags": [
+                    "RO",
+                    "ACCESS"
+                ],
+                "begin_search": {
+                    "index": {
+                        "pos": 2
+                    }
+                },
+                "find_keys": {
+                    "range": {
+                        "lastkey": 0,
+                        "step": 1,
+                        "limit": 0
+                    }
+                }
+            }
+        ],
+        "reply_schema": {
+            "type": "integer",
+            "description": "The number of members stored."
+        },
+        "arguments": [
+            {
+                "name": "dst",
+                "type": "key",
+                "key_spec_index": 0
+            },
+            {
+                "name": "src",
+                "type": "key",
+                "key_spec_index": 1
+            },
+            {
+                "name": "start",
+                "type": "string"
+            },
+            {
+                "name": "stop",
+                "type": "string"
+            },
+            {
+                "name": "sortby",
+                "type": "oneof",
+                "optional": true,
+                "arguments": [
+                    {
+                        "name": "byscore",
+                        "token": "BYSCORE",
+                        "type": "pure-token"
+                    },
+                    {
+                        "name": "bylex",
+                        "token": "BYLEX",
+                        "type": "pure-token"
+                    }
+                ]
+            },
+            {
+                "name": "rev",
+                "token": "REV",
+                "type": "pure-token",
+                "optional": true
+            },
+            {
+                "name": "limit",
+                "type": "block",
+                "optional": true,
+                "arguments": [
+                    {
+                        "name": "limit-token",
+                        "token": "LIMIT",
+                        "type": "pure-token"
+                    },
+                    {
+                        "name": "offset",
+                        "type": "integer"
+                    },
+                    {
+                        "name": "count",
+                        "type": "integer"
+                    }
+                ]
+            }
+        ]
+    }
+}

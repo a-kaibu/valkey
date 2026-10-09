@@ -1,0 +1,76 @@
+{
+    "ZVREVRANGEBYLEX": {
+        "summary": "Returns members in a ZVSET member-name range, ordered from high to low. Requires uniform vector scores.",
+        "complexity": "O(log(N)+M)",
+        "group": "sorted_set",
+        "since": "9.2.0",
+        "arity": -4,
+        "function": "zvrevrangebylexCommand",
+        "command_flags": [
+            "READONLY"
+        ],
+        "acl_categories": [
+            "READ",
+            "SORTEDSET",
+            "SLOW"
+        ],
+        "key_specs": [
+            {
+                "flags": [
+                    "RO",
+                    "ACCESS"
+                ],
+                "begin_search": {
+                    "index": {
+                        "pos": 1
+                    }
+                },
+                "find_keys": {
+                    "range": {
+                        "lastkey": 0,
+                        "step": 1,
+                        "limit": 0
+                    }
+                }
+            }
+        ],
+        "reply_schema": {
+            "type": "array"
+        },
+        "arguments": [
+            {
+                "name": "key",
+                "type": "key",
+                "key_spec_index": 0
+            },
+            {
+                "name": "max",
+                "type": "string"
+            },
+            {
+                "name": "min",
+                "type": "string"
+            },
+            {
+                "name": "limit",
+                "type": "block",
+                "optional": true,
+                "arguments": [
+                    {
+                        "name": "limit-token",
+                        "token": "LIMIT",
+                        "type": "pure-token"
+                    },
+                    {
+                        "name": "offset",
+                        "type": "integer"
+                    },
+                    {
+                        "name": "count",
+                        "type": "integer"
+                    }
+                ]
+            }
+        ]
+    }
+}

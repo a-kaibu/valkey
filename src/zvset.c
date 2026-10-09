@@ -209,8 +209,7 @@ void zvScoreRanks(zvset *zs, const_sds lower, const_sds upper, unsigned long *lo
 }
 
 void zvIterateRange(zvset *zs, unsigned long lo, unsigned long hi, int reverse, long offset, long count,
-                    zvRangeEmit emit, void *ctx) {
-    if (lo >= hi) return;
+                    zvRangeEmit emit, void *ctx) {    if (lo >= hi) return;
     if (offset < 0) offset = 0;
     fbtreeIterator it;
     fbtreeInitIterator(&it, zs->tree);
@@ -238,6 +237,70 @@ void zvIterateRange(zvset *zs, unsigned long lo, unsigned long hi, int reverse, 
             emit(ctx, item);
         }
     }
+}
+
+/* --- Lex bounds (BYLEX, uniform-vector keys only) --- */
+
+int zvParseLexBound(const char *str, size_t len, zvLexBound *bound) {
+    bound->unbounded = 0;
+    bound->exclusive = 0;
+    bound->member = NULL;
+    if (len == 1 && (str[0] == '-' || str[0] == '+')) {
+        bound->unbounded = 1;
+        return C_OK;
+    }
+    if (len >= 1 && (str[0] == '[' || str[0] == '(')) {
+        bound->exclusive = (str[0] == '(');
+        bound->member = sdsnewlen(str + 1, len - 1);
+        return C_OK;
+    }
+    return C_ERR;
+}
+
+void zvFreeLexBound(zvLexBound *bound) {
+    if (bound->member) sdsfree(bound->member);
+    bound->member = NULL;
+}
+
+int zvLexMemberCompare(const char *a, size_t alen, const char *b, size_t blen) {
+    size_t minlen = alen < blen ? alen : blen;
+    int cmp = minlen ? memcmp(a, b, minlen) : 0;
+    if (cmp != 0) return cmp < 0 ? -1 : 1;
+    if (alen == blen) return 0;
+    return alen < blen ? -1 : 1;
+}
+
+/* Compare the score prefixes ([dims][sortables]) of two packed items. */
+static int zvItemPrefixCompare(const_sds a, const_sds b) {
+    uint8_t da = (uint8_t)a[0];
+    uint8_t db = (uint8_t)b[0];
+    if (da != db) return da < db ? -1 : 1;
+    size_t prefix = 1 + (size_t)da * 8;
+    serverAssert(sdslen(a) >= prefix && sdslen(b) >= prefix);
+    int cmp = memcmp(a, b, prefix);
+    if (cmp != 0) return cmp < 0 ? -1 : 1;
+    return 0;
+}
+
+int zvsetUniformVector(zvset *zs) {
+    if (fbtreeLength(zs->tree) <= 1) return 1;
+    const_sds first = fbtreePeekMin(zs->tree);
+    const_sds last = fbtreePeekMax(zs->tree);
+    serverAssert(first != NULL && last != NULL);
+    if (zvItemPrefixCompare(first, last) != 0) return 0;
+    return 1;
+}
+
+sds zvLexSeekKey(zvset *zs, const char *member, size_t member_len) {
+    const_sds first = fbtreePeekMin(zs->tree);
+    serverAssert(first != NULL);
+    uint8_t dims = (uint8_t)first[0];
+    size_t prefix = 1 + (size_t)dims * 8;
+    serverAssert(sdslen(first) >= prefix);
+    sds key = sdsnewlen(NULL, prefix + member_len);
+    memcpy(key, first, prefix);
+    memcpy(key + prefix, member, member_len);
+    return key;
 }
 
 /* Create packed fbtree item: [dims:u8][sortable...][member]. */

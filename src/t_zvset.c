@@ -353,9 +353,9 @@ static void zvrangeReply(client *c, zvset *zs, unsigned long lo, unsigned long h
     zvIterateRange(zs, lo, hi, reverse, offset, count, zvRangeEmitClient, &ctx);
 }
 
-/* Resolve BYSCORE [lower,upper) bound SDS pair from parsed bounds.
+/* Resolve BYSCORE lower/upper bound SDS pair from parsed bounds.
  * Returns 1 with *empty=1 when the range is trivially empty.
- * Caller frees *lower/*upper (NULL when unbounded). */
+ * Caller frees *lower and *upper (NULL when unbounded). */
 static int zvBuildScoreInterval(zvScoreBound *minb, zvScoreBound *maxb, sds *lower, sds *upper, int *empty) {
     *lower = NULL;
     *upper = NULL;
@@ -401,9 +401,91 @@ static int zvBuildScoreInterval(zvScoreBound *minb, zvScoreBound *maxb, sds *low
 static void zvrangeRankCore(client *c, robj *zobj, long start, long stop, int reverse, int withscores);
 static int zvrangeScoreCore(client *c, robj *zobj, const char *minraw, size_t minlen, const char *maxraw,
                             size_t maxlen, int reverse, int withscores, int has_limit, long offset, long count);
+static int zvrangeLexCore(client *c, robj *zobj, const char *minraw, size_t minlen, const char *maxraw,
+                          size_t maxlen, int reverse, int withscores, int has_limit, long offset, long count);
+
+/* Parsed trailing range options shared by ZVRANGE/ZVRANGESTORE. */
+typedef struct zvRangeOpts {
+    int mode; /* 0 = rank, 1 = byscore, 2 = bylex */
+    int reverse;
+    int withscores;
+    int has_limit;
+    long offset;
+    long count;
+} zvRangeOpts;
+
+/* Parse c->argv[first..argc) as range options. allow_withscores gates
+ * WITHSCORES (rejected for STORE). Returns C_OK, or C_ERR with a reply
+ * already sent. LIMIT requires BYSCORE/BYLEX. */
+static int zvRangeParseOpts(client *c, int first, int allow_withscores, zvRangeOpts *o) {
+    o->mode = 0;
+    o->reverse = 0;
+    o->withscores = 0;
+    o->has_limit = 0;
+    o->offset = 0;
+    o->count = -1;
+    int idx = first;
+    while (idx < c->argc) {
+        char *opt = objectGetVal(c->argv[idx]);
+        if (!strcasecmp(opt, "byscore")) {
+            if (o->mode != 0) {
+                addReplyErrorObject(c, shared.syntaxerr);
+                return C_ERR;
+            }
+            o->mode = 1;
+            idx++;
+        } else if (!strcasecmp(opt, "bylex")) {
+            if (o->mode != 0) {
+                addReplyErrorObject(c, shared.syntaxerr);
+                return C_ERR;
+            }
+            o->mode = 2;
+            idx++;
+        } else if (!strcasecmp(opt, "rev")) {
+            o->reverse = 1;
+            idx++;
+        } else if (!strcasecmp(opt, "withscores")) {
+            if (!allow_withscores) {
+                addReplyErrorObject(c, shared.syntaxerr);
+                return C_ERR;
+            }
+            o->withscores = 1;
+            idx++;
+        } else if (!strcasecmp(opt, "limit")) {
+            if (o->has_limit || idx + 2 >= c->argc) {
+                addReplyErrorObject(c, shared.syntaxerr);
+                return C_ERR;
+            }
+            if (getLongFromObjectOrReply(c, c->argv[idx + 1], &o->offset, NULL) != C_OK) return C_ERR;
+            if (getLongFromObjectOrReply(c, c->argv[idx + 2], &o->count, NULL) != C_OK) return C_ERR;
+            if (o->offset < 0) {
+                addReplyError(c, "LIMIT offset must be non-negative");
+                return C_ERR;
+            }
+            o->has_limit = 1;
+            idx += 3;
+        } else {
+            addReplyErrorObject(c, shared.syntaxerr);
+            return C_ERR;
+        }
+    }
+    if (o->has_limit && o->mode == 0) {
+        addReplyError(c, "LIMIT is only supported with BYSCORE or BYLEX");
+        return C_ERR;
+    }
+    return C_OK;
+}
+
+/* Syntax-only check for a BYLEX bound. */
+static int zvLexBoundSyntaxOk(const char *str, size_t len) {
+    if (len == 1 && (str[0] == '-' || str[0] == '+')) return 1;
+    if (len >= 1 && (str[0] == '[' || str[0] == '(')) return 1;
+    return 0;
+}
 
 /* Syntax-only check for a BYSCORE bound (any dimension count). */
-static int zvScoreBoundSyntaxOk(const char *str, size_t len) {    if (len == 1 && (str[0] == '-' || str[0] == '+')) return 1;
+static int zvScoreBoundSyntaxOk(const char *str, size_t len) {
+    if (len == 1 && (str[0] == '-' || str[0] == '+')) return 1;
     if (len > 1 && str[0] == '(') {
         str++;
         len--;
@@ -417,93 +499,62 @@ static int zvScoreBoundSyntaxOk(const char *str, size_t len) {    if (len == 1 &
 void zvrangeCommand(client *c) {
     robj *key = c->argv[1];
     robj *zobj;
-    int mode = 0; /* 0 = rank, 1 = byscore */
     long start = 0, stop = -1;
-    int reverse = 0, withscores = 0;
-    int has_limit = 0;
-    long offset = 0, count = -1;
+    zvRangeOpts o;
 
     if (c->argc < 4) {
         addReplyErrorObject(c, shared.syntaxerr);
         return;
     }
-    /* Parse trailing options first (any order). */
-    int idx = 4;
+    if (zvRangeParseOpts(c, 4, 1, &o) != C_OK) return;
+
     sds bound_min_raw = NULL, bound_max_raw = NULL;
     size_t bound_min_len = 0, bound_max_len = 0;
-    while (idx < c->argc) {
-        char *opt = objectGetVal(c->argv[idx]);
-        if (!strcasecmp(opt, "byscore")) {
-            if (mode != 0) goto zvrange_syntax;
-            mode = 1;
-            idx++;
-        } else if (!strcasecmp(opt, "rev")) {
-            reverse = 1;
-            idx++;
-        } else if (!strcasecmp(opt, "withscores")) {
-            withscores = 1;
-            idx++;
-        } else if (!strcasecmp(opt, "limit")) {
-            if (has_limit || idx + 2 >= c->argc) goto zvrange_syntax;
-            if (getLongFromObjectOrReply(c, c->argv[idx + 1], &offset, NULL) != C_OK) return;
-            if (getLongFromObjectOrReply(c, c->argv[idx + 2], &count, NULL) != C_OK) return;
-            if (offset < 0) {
-                addReplyError(c, "LIMIT offset must be non-negative");
-                return;
-            }
-            has_limit = 1;
-            idx += 3;
-        } else {
-            goto zvrange_syntax;
-        }
-    }
-    if (has_limit && mode != 1) {
-        addReplyError(c, "LIMIT is only supported with BYSCORE or BYLEX");
-        return;
-    }
-
-    if (mode == 0) {
+    if (o.mode == 0) {
         if (getLongFromObjectOrReply(c, c->argv[2], &start, NULL) != C_OK) return;
         if (getLongFromObjectOrReply(c, c->argv[3], &stop, NULL) != C_OK) return;
     } else {
         /* REV takes max first, like ZRANGE. */
-        int minarg = reverse ? 3 : 2;
-        int maxarg = reverse ? 2 : 3;
+        int minarg = o.reverse ? 3 : 2;
+        int maxarg = o.reverse ? 2 : 3;
         bound_min_raw = objectGetVal(c->argv[minarg]);
         bound_min_len = sdslen(bound_min_raw);
         bound_max_raw = objectGetVal(c->argv[maxarg]);
         bound_max_len = sdslen(bound_max_raw);
-    }
-
-    if (mode == 1) {
         /* Validate bound syntax even for missing keys. */
-        if (!zvScoreBoundSyntaxOk(bound_min_raw, bound_min_len) ||
-            !zvScoreBoundSyntaxOk(bound_max_raw, bound_max_len)) {
-            addReplyError(c, "invalid vector score range");
-            return;
+        if (o.mode == 1) {
+            if (!zvScoreBoundSyntaxOk(bound_min_raw, bound_min_len) ||
+                !zvScoreBoundSyntaxOk(bound_max_raw, bound_max_len)) {
+                addReplyError(c, "invalid vector score range");
+                return;
+            }
+        } else {
+            if (!zvLexBoundSyntaxOk(bound_min_raw, bound_min_len) ||
+                !zvLexBoundSyntaxOk(bound_max_raw, bound_max_len)) {
+                addReplyError(c, "min or max not valid string range item");
+                return;
+            }
         }
     }
     if ((zobj = lookupKeyReadOrReply(c, key, shared.emptyarray)) == NULL || checkType(c, zobj, OBJ_ZVSET))
         return;
-    {
-        zvset *zs = objectGetVal(zobj);
-        unsigned long len = zvsetLength(zs);
-        if (mode == 0) {
-            zvrangeRankCore(c, zobj, start, stop, reverse, withscores);
-            return;
-        }
-        /* BYSCORE path. */
-        if (zvrangeScoreCore(c, zobj, bound_min_raw, bound_min_len, bound_max_raw, bound_max_len, reverse,
-                             withscores, has_limit, offset, count) != C_OK) {
+    if (o.mode == 0) {
+        zvrangeRankCore(c, zobj, start, stop, o.reverse, o.withscores);
+        return;
+    }
+    if (o.mode == 1) {
+        if (zvrangeScoreCore(c, zobj, bound_min_raw, bound_min_len, bound_max_raw, bound_max_len, o.reverse,
+                             o.withscores, o.has_limit, o.offset, o.count) != C_OK) {
             addReplyError(c, "invalid vector score range");
             return;
         }
         return;
     }
-
-zvrange_syntax:
-    addReplyErrorObject(c, shared.syntaxerr);
-    return;
+    if (zvrangeLexCore(c, zobj, bound_min_raw, bound_min_len, bound_max_raw, bound_max_len, o.reverse,
+                       o.withscores, o.has_limit, o.offset, o.count) != C_OK) {
+        /* Error reply already sent by the core. */
+        return;
+    }
 }
 
 /* Rank core shared by ZVRANGE/ZVREVRANGE. */
@@ -642,6 +693,491 @@ void zvrangebyscoreCommand(client *c) {
 
 void zvrevrangebyscoreCommand(client *c) {
     zvrangebyscoreGenericCommand(c, 1);
+}
+
+/* Build [lower,upper) seek keys for uniform-vector BYLEX. Returns C_OK;
+ * *empty is set when the range is trivially empty. The key must be
+ * non-empty and uniform (checked by the caller). */
+static int zvBuildLexInterval(zvset *zs, zvLexBound *minb, zvLexBound *maxb, sds *lower, sds *upper, int *empty) {
+    *lower = NULL;
+    *upper = NULL;
+    *empty = 0;
+    if (!minb->unbounded && !maxb->unbounded) {
+        int cmp = zvLexMemberCompare(minb->member, sdslen(minb->member), maxb->member, sdslen(maxb->member));
+        if (cmp > 0 || (cmp == 0 && (minb->exclusive || maxb->exclusive))) {
+            *empty = 1;
+            return C_OK;
+        }
+    }
+    if (!minb->unbounded) {
+        sds key = zvLexSeekKey(zs, minb->member, sdslen(minb->member));
+        if (minb->exclusive) {
+            *lower = zvBoundSuccessor(key);
+            sdsfree(key);
+            if (*lower == NULL) {
+                *empty = 1;
+                return C_OK;
+            }
+        } else {
+            *lower = key;
+        }
+    }
+    if (!maxb->unbounded) {
+        sds key = zvLexSeekKey(zs, maxb->member, sdslen(maxb->member));
+        if (maxb->exclusive) {
+            *upper = key;
+        } else {
+            *upper = zvBoundSuccessor(key);
+            sdsfree(key);
+            if (*upper == NULL) *upper = NULL; /* Covers everything above. */
+        }
+    }
+    return C_OK;
+}
+
+/* Error message shared by every BYLEX entry point. */
+static void zvReplyBylexUniformError(client *c) {
+    addReplyError(c, "BYLEX requires all members to share the same vector score");
+}
+
+/* BYLEX core shared by ZVRANGE/ZVRANGEBYLEX/ZVREVRANGEBYLEX/ZVLEXCOUNT.
+ * Withscores is always 0 for BYLEX (members only). Returns C_OK, or
+ * C_ERR with a reply already sent. */
+static int zvrangeLexCore(client *c, robj *zobj, const char *minraw, size_t minlen, const char *maxraw,
+                          size_t maxlen, int reverse, int withscores, int has_limit, long offset, long count) {
+    zvset *zs = objectGetVal(zobj);
+    if (!zvsetUniformVector(zs)) {
+        zvReplyBylexUniformError(c);
+        return C_ERR;
+    }
+    zvLexBound minb, maxb;
+    if (zvParseLexBound(minraw, minlen, &minb) != C_OK || zvParseLexBound(maxraw, maxlen, &maxb) != C_OK) {
+        zvFreeLexBound(&minb);
+        zvFreeLexBound(&maxb);
+        addReplyError(c, "min or max not valid string range item");
+        return C_ERR;
+    }
+    sds lower = NULL, upper = NULL;
+    int empty = 0;
+    zvBuildLexInterval(zs, &minb, &maxb, &lower, &upper, &empty);
+    zvFreeLexBound(&minb);
+    zvFreeLexBound(&maxb);
+    if (empty) {
+        if (lower) sdsfree(lower);
+        if (upper) sdsfree(upper);
+        addReplyArrayLen(c, 0);
+        return C_OK;
+    }
+    unsigned long lo, hi;
+    zvScoreRanks(zs, lower, upper, &lo, &hi);
+    if (lower) sdsfree(lower);
+    if (upper) sdsfree(upper);
+    long lim_off = has_limit ? offset : 0;
+    long lim_cnt = has_limit ? count : -1;
+    zvrangeReply(c, zs, lo, hi, reverse, lim_off, lim_cnt, withscores);
+    return C_OK;
+}
+
+/* Shared BYLEX wrapper core: ZVRANGEBYLEX (reverse=0) /
+ * ZVREVRANGEBYLEX (reverse=1, args max min). */
+static void zvrangebylexGenericCommand(client *c, int reverse) {
+    robj *key = c->argv[1];
+    robj *zobj;
+    int has_limit = 0;
+    long offset = 0, count = -1;
+
+    if (c->argc < 4) {
+        addReplyErrorObject(c, shared.syntaxerr);
+        return;
+    }
+    int idx = 4;
+    while (idx < c->argc) {
+        char *opt = objectGetVal(c->argv[idx]);
+        if (!strcasecmp(opt, "limit")) {
+            if (has_limit || idx + 2 >= c->argc) {
+                addReplyErrorObject(c, shared.syntaxerr);
+                return;
+            }
+            if (getLongFromObjectOrReply(c, c->argv[idx + 1], &offset, NULL) != C_OK) return;
+            if (getLongFromObjectOrReply(c, c->argv[idx + 2], &count, NULL) != C_OK) return;
+            if (offset < 0) {
+                addReplyError(c, "LIMIT offset must be non-negative");
+                return;
+            }
+            has_limit = 1;
+            idx += 3;
+        } else {
+            addReplyErrorObject(c, shared.syntaxerr);
+            return;
+        }
+    }
+    int minarg = reverse ? 3 : 2;
+    int maxarg = reverse ? 2 : 3;
+    sds minraw = objectGetVal(c->argv[minarg]);
+    sds maxraw = objectGetVal(c->argv[maxarg]);
+    if (!zvLexBoundSyntaxOk(minraw, sdslen(minraw)) || !zvLexBoundSyntaxOk(maxraw, sdslen(maxraw))) {
+        addReplyError(c, "min or max not valid string range item");
+        return;
+    }
+    if ((zobj = lookupKeyReadOrReply(c, key, shared.emptyarray)) == NULL || checkType(c, zobj, OBJ_ZVSET))
+        return;
+    zvrangeLexCore(c, zobj, minraw, sdslen(minraw), maxraw, sdslen(maxraw), reverse, 0, has_limit, offset, count);
+}
+
+void zvrangebylexCommand(client *c) {
+    zvrangebylexGenericCommand(c, 0);
+}
+
+void zvrevrangebylexCommand(client *c) {
+    zvrangebylexGenericCommand(c, 1);
+}
+
+void zvlexcountCommand(client *c) {
+    robj *key = c->argv[1];
+    robj *zobj;
+
+    if (c->argc != 4) {
+        addReplyErrorObject(c, shared.syntaxerr);
+        return;
+    }
+    sds minraw = objectGetVal(c->argv[2]);
+    sds maxraw = objectGetVal(c->argv[3]);
+    if (!zvLexBoundSyntaxOk(minraw, sdslen(minraw)) || !zvLexBoundSyntaxOk(maxraw, sdslen(maxraw))) {
+        addReplyError(c, "min or max not valid string range item");
+        return;
+    }
+    if ((zobj = lookupKeyReadOrReply(c, key, shared.czero)) == NULL || checkType(c, zobj, OBJ_ZVSET)) return;
+    zvset *zs = objectGetVal(zobj);
+    if (!zvsetUniformVector(zs)) {
+        zvReplyBylexUniformError(c);
+        return;
+    }
+    zvLexBound minb, maxb;
+    if (zvParseLexBound(minraw, sdslen(minraw), &minb) != C_OK ||
+        zvParseLexBound(maxraw, sdslen(maxraw), &maxb) != C_OK) {
+        zvFreeLexBound(&minb);
+        zvFreeLexBound(&maxb);
+        addReplyError(c, "min or max not valid string range item");
+        return;
+    }
+    sds lower = NULL, upper = NULL;
+    int empty = 0;
+    zvBuildLexInterval(zs, &minb, &maxb, &lower, &upper, &empty);
+    zvFreeLexBound(&minb);
+    zvFreeLexBound(&maxb);
+    long long count;
+    if (empty) {
+        count = 0;
+    } else if (lower != NULL && upper != NULL) {
+        count = (long long)fbtreeCountRangeByValue(zs->tree, lower, upper, 0, 1);
+    } else {
+        unsigned long lo, hi;
+        zvScoreRanks(zs, lower, upper, &lo, &hi);
+        count = (long long)(hi - lo);
+    }
+    if (lower) sdsfree(lower);
+    if (upper) sdsfree(upper);
+    addReplyLongLong(c, count);
+}
+
+/* Collect packed-item copies for RANGESTORE (src may be replaced). */
+typedef struct zvStoreCollect {
+    sds *items;
+    size_t len;
+    size_t cap;
+} zvStoreCollect;
+
+static void zvStoreCollectEmit(void *ctx, const_sds item) {
+    zvStoreCollect *col = ctx;
+    if (col->len == col->cap) {
+        col->cap = col->cap ? col->cap * 2 : 16;
+        col->items = zrealloc(col->items, sizeof(sds) * col->cap);
+    }
+    col->items[col->len++] = sdsdup(item);
+}
+
+void zvrangestoreCommand(client *c) {
+    robj *dstkey = c->argv[1];
+    robj *srckey = c->argv[2];
+    robj *srcobj, *dstobj;
+    zvRangeOpts o;
+
+    if (c->argc < 5) {
+        addReplyErrorObject(c, shared.syntaxerr);
+        return;
+    }
+    if (zvRangeParseOpts(c, 5, 0, &o) != C_OK) return;
+
+    long start = 0, stop = -1;
+    sds bound_min_raw = NULL, bound_max_raw = NULL;
+    size_t bound_min_len = 0, bound_max_len = 0;
+    if (o.mode == 0) {
+        if (getLongFromObjectOrReply(c, c->argv[3], &start, NULL) != C_OK) return;
+        if (getLongFromObjectOrReply(c, c->argv[4], &stop, NULL) != C_OK) return;
+    } else {
+        int minarg = o.reverse ? 4 : 3;
+        int maxarg = o.reverse ? 3 : 4;
+        bound_min_raw = objectGetVal(c->argv[minarg]);
+        bound_min_len = sdslen(bound_min_raw);
+        bound_max_raw = objectGetVal(c->argv[maxarg]);
+        bound_max_len = sdslen(bound_max_raw);
+        if (o.mode == 1) {
+            if (!zvScoreBoundSyntaxOk(bound_min_raw, bound_min_len) ||
+                !zvScoreBoundSyntaxOk(bound_max_raw, bound_max_len)) {
+                addReplyError(c, "invalid vector score range");
+                return;
+            }
+        } else {
+            if (!zvLexBoundSyntaxOk(bound_min_raw, bound_min_len) ||
+                !zvLexBoundSyntaxOk(bound_max_raw, bound_max_len)) {
+                addReplyError(c, "min or max not valid string range item");
+                return;
+            }
+        }
+    }
+
+    /* Missing source: delete destination, return 0 (like ZRANGESTORE). */
+    if ((srcobj = lookupKeyWrite(c->db, srckey)) == NULL) {
+        if (lookupKeyWrite(c->db, dstkey) != NULL) dbDelete(c->db, dstkey);
+        addReplyLongLong(c, 0);
+        return;
+    }
+    if (checkType(c, srcobj, OBJ_ZVSET)) return;
+    dstobj = lookupKeyWrite(c->db, dstkey);
+    if (dstobj != NULL && checkType(c, dstobj, OBJ_ZVSET)) return;
+
+    zvset *src = objectGetVal(srcobj);
+    unsigned long lo = 0, hi = 0;
+    if (o.mode == 0) {
+        unsigned long len = zvsetLength(src);
+        long s = start, e = stop;
+        if (s < 0) s = (long)len + s;
+        if (e < 0) e = (long)len + e;
+        if (s < 0) s = 0;
+        if (!(e < 0 || s > e || s >= (long)len)) {
+            if (e >= (long)len) e = (long)len - 1;
+            lo = (unsigned long)s;
+            hi = (unsigned long)e + 1;
+        }
+    } else if (o.mode == 1) {
+        zvScoreBound minb, maxb;
+        if (zvParseScoreBound(bound_min_raw, bound_min_len, src->dimensions, &minb) != C_OK ||
+            zvParseScoreBound(bound_max_raw, bound_max_len, src->dimensions, &maxb) != C_OK) {
+            zvFreeScoreBound(&minb);
+            zvFreeScoreBound(&maxb);
+            addReplyError(c, "invalid vector score range");
+            return;
+        }
+        sds lower = NULL, upper = NULL;
+        int empty = 0;
+        zvBuildScoreInterval(&minb, &maxb, &lower, &upper, &empty);
+        zvFreeScoreBound(&minb);
+        zvFreeScoreBound(&maxb);
+        if (!empty) zvScoreRanks(src, lower, upper, &lo, &hi);
+        if (lower) sdsfree(lower);
+        if (upper) sdsfree(upper);
+    } else {
+        if (!zvsetUniformVector(src)) {
+            zvReplyBylexUniformError(c);
+            return;
+        }
+        zvLexBound minb, maxb;
+        if (zvParseLexBound(bound_min_raw, bound_min_len, &minb) != C_OK ||
+            zvParseLexBound(bound_max_raw, bound_max_len, &maxb) != C_OK) {
+            zvFreeLexBound(&minb);
+            zvFreeLexBound(&maxb);
+            addReplyError(c, "min or max not valid string range item");
+            return;
+        }
+        sds lower = NULL, upper = NULL;
+        int empty = 0;
+        zvBuildLexInterval(src, &minb, &maxb, &lower, &upper, &empty);
+        zvFreeLexBound(&minb);
+        zvFreeLexBound(&maxb);
+        if (!empty) zvScoreRanks(src, lower, upper, &lo, &hi);
+        if (lower) sdsfree(lower);
+        if (upper) sdsfree(upper);
+    }
+
+    /* Collect first: dst may be src. */
+    zvStoreCollect col = {NULL, 0, 0};
+    long lim_off = o.has_limit ? o.offset : 0;
+    long lim_cnt = o.has_limit ? o.count : -1;
+    zvIterateRange(src, lo, hi, o.reverse, lim_off, lim_cnt, zvStoreCollectEmit, &col);
+
+    uint8_t dims = src->dimensions;
+    /* Replace wholesale, even on dimension change. */
+    if (lookupKeyWrite(c->db, dstkey) != NULL) dbDelete(c->db, dstkey);
+    if (col.len > 0) {
+        robj *newobj = createZvsetObject(dims);
+        zvset *newzs = objectGetVal(newobj);
+        hashtableExpand(newzs->ht, col.len);
+        for (size_t i = 0; i < col.len; i++) {
+            sds inserted = fbtreeInsert(newzs->tree, col.items[i]);
+            serverAssert(hashtableAdd(newzs->ht, inserted));
+        }
+        zfree(col.items);
+        dbAdd(c->db, dstkey, &newobj);
+        signalModifiedKey(c, c->db, dstkey);
+        notifyKeyspaceEvent(NOTIFY_GENERIC, "zvrangestore", dstkey, c->db->id);
+        server.dirty++;
+    } else {
+        zfree(col.items);
+    }
+    addReplyLongLong(c, (long long)col.len);
+}
+
+/* Callback for fbtree range deletion: drop the hashtable reference
+ * while the packed item is still alive (fbtree frees it after). */
+static void zvRangeDeleteCallback(sds item, void *ctx) {
+    zvset *zs = ctx;
+    serverAssert(hashtableDelete(zs->ht, item));
+}
+
+/* Shared tail for REMRANGE*: pause shrink held, key deletion, notify. */
+static void zvremrangeFinish(client *c, robj *key, zvset *zs, unsigned long deleted, char *event) {
+    int keyremoved = 0;
+    if (hashtableSize(zs->ht) == 0) {
+        dbDelete(c->db, key);
+        keyremoved = 1;
+    } else {
+        hashtableResumeAutoShrink(zs->ht);
+    }
+    if (deleted) {
+        signalModifiedKey(c, c->db, key);
+        notifyKeyspaceEvent(NOTIFY_GENERIC, event, key, c->db->id);
+        if (keyremoved) notifyKeyspaceEvent(NOTIFY_GENERIC, "del", key, c->db->id);
+        server.dirty += deleted;
+    }
+    addReplyLongLong(c, (long long)deleted);
+}
+
+void zvremrangebyrankCommand(client *c) {
+    robj *key = c->argv[1];
+    robj *zobj;
+    long start, stop;
+    unsigned long deleted = 0;
+
+    if (c->argc != 4) {
+        addReplyErrorObject(c, shared.syntaxerr);
+        return;
+    }
+    if (getLongFromObjectOrReply(c, c->argv[2], &start, NULL) != C_OK) return;
+    if (getLongFromObjectOrReply(c, c->argv[3], &stop, NULL) != C_OK) return;
+    if ((zobj = lookupKeyWriteOrReply(c, key, shared.czero)) == NULL || checkType(c, zobj, OBJ_ZVSET)) return;
+
+    zvset *zs = objectGetVal(zobj);
+    long len = (long)zvsetLength(zs);
+    if (start < 0) start = len + start;
+    if (stop < 0) stop = len + stop;
+    if (start < 0) start = 0;
+    if (!(stop < 0 || start > stop || start >= len)) {
+        if (stop >= len) stop = len - 1;
+        hashtablePauseAutoShrink(zs->ht);
+        deleted = fbtreeDeleteRangeByRank(zs->tree, (unsigned long)start, (unsigned long)stop,
+                                         zvRangeDeleteCallback, zs);
+        zvremrangeFinish(c, key, zs, deleted, "zvremrangebyrank");
+        return;
+    }
+    addReply(c, shared.czero);
+}
+
+void zvremrangebyscoreCommand(client *c) {
+    robj *key = c->argv[1];
+    robj *zobj;
+    unsigned long deleted = 0;
+
+    if (c->argc != 4) {
+        addReplyErrorObject(c, shared.syntaxerr);
+        return;
+    }
+    sds minraw = objectGetVal(c->argv[2]);
+    sds maxraw = objectGetVal(c->argv[3]);
+    if (!zvScoreBoundSyntaxOk(minraw, sdslen(minraw)) || !zvScoreBoundSyntaxOk(maxraw, sdslen(maxraw))) {
+        addReplyError(c, "invalid vector score range");
+        return;
+    }
+    if ((zobj = lookupKeyWriteOrReply(c, key, shared.czero)) == NULL || checkType(c, zobj, OBJ_ZVSET)) return;
+    zvset *zs = objectGetVal(zobj);
+    zvScoreBound minb, maxb;
+    if (zvParseScoreBound(minraw, sdslen(minraw), zs->dimensions, &minb) != C_OK ||
+        zvParseScoreBound(maxraw, sdslen(maxraw), zs->dimensions, &maxb) != C_OK) {
+        zvFreeScoreBound(&minb);
+        zvFreeScoreBound(&maxb);
+        addReplyError(c, "invalid vector score range");
+        return;
+    }
+    sds lower = NULL, upper = NULL;
+    int empty = 0;
+    zvBuildScoreInterval(&minb, &maxb, &lower, &upper, &empty);
+    zvFreeScoreBound(&minb);
+    zvFreeScoreBound(&maxb);
+    hashtablePauseAutoShrink(zs->ht);
+    if (!empty) {
+        if (lower != NULL && upper != NULL) {
+            deleted = fbtreeDeleteRangeByValue(zs->tree, lower, upper, 0, 1, zvRangeDeleteCallback, zs);
+        } else {
+            unsigned long lo, hi;
+            zvScoreRanks(zs, lower, upper, &lo, &hi);
+            if (lo < hi) {
+                deleted = fbtreeDeleteRangeByRank(zs->tree, lo, hi - 1, zvRangeDeleteCallback, zs);
+            }
+        }
+    }
+    if (lower) sdsfree(lower);
+    if (upper) sdsfree(upper);
+    zvremrangeFinish(c, key, zs, deleted, "zvremrangebyscore");
+}
+
+void zvremrangebylexCommand(client *c) {
+    robj *key = c->argv[1];
+    robj *zobj;
+    unsigned long deleted = 0;
+
+    if (c->argc != 4) {
+        addReplyErrorObject(c, shared.syntaxerr);
+        return;
+    }
+    sds minraw = objectGetVal(c->argv[2]);
+    sds maxraw = objectGetVal(c->argv[3]);
+    if (!zvLexBoundSyntaxOk(minraw, sdslen(minraw)) || !zvLexBoundSyntaxOk(maxraw, sdslen(maxraw))) {
+        addReplyError(c, "min or max not valid string range item");
+        return;
+    }
+    if ((zobj = lookupKeyWriteOrReply(c, key, shared.czero)) == NULL || checkType(c, zobj, OBJ_ZVSET)) return;
+    zvset *zs = objectGetVal(zobj);
+    if (!zvsetUniformVector(zs)) {
+        zvReplyBylexUniformError(c);
+        return;
+    }
+    zvLexBound minb, maxb;
+    if (zvParseLexBound(minraw, sdslen(minraw), &minb) != C_OK ||
+        zvParseLexBound(maxraw, sdslen(maxraw), &maxb) != C_OK) {
+        zvFreeLexBound(&minb);
+        zvFreeLexBound(&maxb);
+        addReplyError(c, "min or max not valid string range item");
+        return;
+    }
+    sds lower = NULL, upper = NULL;
+    int empty = 0;
+    zvBuildLexInterval(zs, &minb, &maxb, &lower, &upper, &empty);
+    zvFreeLexBound(&minb);
+    zvFreeLexBound(&maxb);
+    hashtablePauseAutoShrink(zs->ht);
+    if (!empty) {
+        if (lower != NULL && upper != NULL) {
+            deleted = fbtreeDeleteRangeByValue(zs->tree, lower, upper, 0, 1, zvRangeDeleteCallback, zs);
+        } else {
+            unsigned long lo, hi;
+            zvScoreRanks(zs, lower, upper, &lo, &hi);
+            if (lo < hi) {
+                deleted = fbtreeDeleteRangeByRank(zs->tree, lo, hi - 1, zvRangeDeleteCallback, zs);
+            }
+        }
+    }
+    if (lower) sdsfree(lower);
+    if (upper) sdsfree(upper);
+    zvremrangeFinish(c, key, zs, deleted, "zvremrangebylex");
 }
 
 void zvcountCommand(client *c) {
