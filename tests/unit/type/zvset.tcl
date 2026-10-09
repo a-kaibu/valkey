@@ -77,8 +77,7 @@ start_server {tags {"zvset"}} {
         assert_equal 0 [r exists x]
     }
 
-    test "ZVADD flags NX XX CH" {
-        zv_create x 1 a
+    test "ZVADD flags NX XX CH" {        zv_create x 1 a
         assert_equal 0 [r zvadd x NX 2 a]
         assert_equal {1} [r zvscore x a]
         assert_equal 1 [r zvadd x NX 1 b]
@@ -90,6 +89,73 @@ start_server {tags {"zvset"}} {
         assert_equal 1 [r zvadd x CH 3 a]
         assert_equal 1 [r zvadd x CH 4 d]
         assert_error "*not compatible*" {r zvadd x NX XX 1 e}
+    }
+
+    test "ZVADD GT LT vector comparison" {
+        zv_create x 5#100 a 6#0 b
+        # GT updates only when the new vector is lexicographically greater.
+        # [5,200] > [5,100]: second component decides.
+        assert_equal 0 [r zvadd x GT 5#200 a]
+        assert_equal {5#200} [r zvscore x a]
+        # [4,999] < [5,200]: first component decides, no update.
+        assert_equal 0 [r zvadd x GT 4#999 a]
+        assert_equal {5#200} [r zvscore x a]
+        assert_equal 0 [r zvadd x LT 4#999 a]
+        assert_equal {4#999} [r zvscore x a]
+        assert_equal 0 [r zvadd x LT 4#1000 a]
+        assert_equal {4#999} [r zvscore x a]
+        # GT/LT on missing member behaves like plain add (no NX/XX).
+        assert_equal 1 [r zvadd x GT 1#1 c]
+        assert_equal 1 [r zvadd x LT 2#2 d]
+        assert_error "*not compatible*" {r zvadd x GT LT 1#1 e}
+        assert_error "*not compatible*" {r zvadd x NX GT 1#1 e}
+        assert_error "*not compatible*" {r zvadd x NX LT 1#1 e}
+    }
+
+    test "ZVADD INCR and ZVINCRBY" {
+        zv_create x 10#20 a
+        assert_equal {12#15} [r zvadd x INCR 2#-5 a]
+        assert_equal {12#15} [r zvscore x a]
+        # missing member starts from zero vector
+        assert_equal {3#4} [r zvadd x INCR 3#4 b]
+        assert_equal {3#4} [r zvscore x b]
+        assert_equal {5#5} [r zvincrby x 2#1 b]
+        # XX on missing member: null, no creation
+        assert_equal {} [r zvadd x XX INCR 1#1 c]
+        assert_equal 0 [r exists c]
+        # missing key without XX: created like ZINCRBY
+        assert_equal {1#1} [r zvincrby newkey 1#1 m]
+        assert_equal {1#1} [r zvscore newkey m]
+        r del newkey
+        # INCR accepts a single pair only
+        assert_error "*single*" {r zvadd x INCR 1#1 a 2#2 b}
+        # +inf + -inf = NaN: error, member unchanged
+        r zvadd x inf#1 n
+        assert_error "*NaN*" {r zvincrby x -inf#0 n}
+        assert_equal {inf#1} [r zvscore x n]
+        # signed zero canonicalization
+        assert_equal {0#0} [r zvincrby x -0#-0 z]
+    }
+
+    test "ZVMSCORE" {
+        zv_create x 1#2 a 3#4 b
+        assert_equal {1#2 3#4 {}} [r zvmscore x a b nok]
+        assert_equal {{} {}} [r zvmscore nokey a b]
+    }
+
+    test "ZVRANK WITHSCORE and ZVREVRANK" {
+        zv_create x 1 a 2 b 3 c
+        assert_equal {0 1} [r zvrank x a withscore]
+        assert_equal {2 3} [r zvrank x c withscore]
+        assert_equal 2 [r zvrevrank x a]
+        assert_equal 1 [r zvrevrank x b]
+        assert_equal 0 [r zvrevrank x c]
+        assert_equal {0 3} [r zvrevrank x c withscore]
+        assert_equal {} [r zvrevrank x nok]
+        # reverse rank follows score updates
+        r zvadd x 0 c
+        assert_equal 2 [r zvrevrank x c]
+        assert_equal 0 [r zvrevrank x b]
     }
 
     test "ZVRANK first/middle/last/missing/update" {

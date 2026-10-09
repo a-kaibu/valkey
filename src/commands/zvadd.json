@@ -64,8 +64,31 @@
                 ]
             },
             {
+                "name": "comparison",
+                "type": "oneof",
+                "optional": true,
+                "arguments": [
+                    {
+                        "name": "gt",
+                        "type": "pure-token",
+                        "token": "GT"
+                    },
+                    {
+                        "name": "lt",
+                        "type": "pure-token",
+                        "token": "LT"
+                    }
+                ]
+            },
+            {
                 "name": "change",
                 "token": "CH",
+                "type": "pure-token",
+                "optional": true
+            },
+            {
+                "name": "increment",
+                "token": "INCR",
                 "type": "pure-token",
                 "optional": true
             },

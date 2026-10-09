@@ -36,6 +36,9 @@ typedef struct zvset {
 #define ZVADD_IN_NONE 0
 #define ZVADD_IN_NX (1 << 0)
 #define ZVADD_IN_XX (1 << 1)
+#define ZVADD_IN_GT (1 << 2)
+#define ZVADD_IN_LT (1 << 3)
+#define ZVADD_IN_INCR (1 << 4)
 
 /* ZVADD output flags. */
 #define ZVADD_OUT_ADDED (1 << 0)
@@ -54,7 +57,15 @@ extern hashtableType zvsetHashtableType;
 
 /* Score vector parsing ("1#2#3.5" style, '#' separated). */
 zvScore *zvScoreParse(const char *str, size_t len);
+zvScore *zvScoreCreate(uint8_t len);
 void zvScoreFree(zvScore *score);
+/* Lexicographic compare of two same-length vectors: -1/0/1. */
+int zvScoreCompare(const zvScore *a, const zvScore *b);
+/* result = base + delta per component. Returns C_OK, or C_ERR if any
+ * component is NaN (result untouched beyond the failing index). */
+int zvScoreIncrement(zvScore *result, const zvScore *base, const zvScore *delta);
+/* Format a parsed vector as "v0#v1#...". Caller must sdsfree(). */
+sds zvScoreFormat(const zvScore *score);
 
 /* double <-> sortable conversion (same rule as ordered_index.c). */
 uint64_t zvScoreToSortable(double score);
@@ -71,6 +82,10 @@ sds zvItemFormatScore(const_sds item);
 
 /* Core operations. member is a plain SDS (not owned). */
 int zvsetAdd(zvset *zs, const zvScore *score, sds member, int in_flags, int *out_flags);
+/* Increment member's vector by delta (missing member starts at zero).
+ * newscore (len == dims) receives the result on success. Returns C_OK,
+ * or C_ERR on NaN result (no mutation). Honors NX/XX/GT/LT. */
+int zvsetIncrBy(zvset *zs, const zvScore *delta, sds member, int in_flags, int *out_flags, zvScore *newscore);
 int zvsetDel(zvset *zs, sds member);
 /* O(1) hashtable lookup. Returns packed item pointer or NULL. */
 void *zvsetFind(zvset *zs, sds member);

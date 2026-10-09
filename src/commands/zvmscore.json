@@ -1,11 +1,11 @@
 {
-    "ZVRANK": {
-        "summary": "Returns the rank of a member in a ZVSET.",
-        "complexity": "O(log(N))",
+    "ZVMSCORE": {
+        "summary": "Returns the vector scores of multiple members in a ZVSET.",
+        "complexity": "O(1) for each member.",
         "group": "sorted_set",
         "since": "9.2.0",
         "arity": -3,
-        "function": "zvrankCommand",
+        "function": "zvmscoreCommand",
         "command_flags": [
             "READONLY",
             "FAST"
@@ -36,14 +36,7 @@
             }
         ],
         "reply_schema": {
-            "oneOf": [
-                {
-                    "type": "integer"
-                },
-                {
-                    "type": "null"
-                }
-            ]
+            "type": "array"
         },
         "arguments": [
             {
@@ -53,13 +46,8 @@
             },
             {
                 "name": "member",
-                "type": "string"
-            },
-            {
-                "name": "withscore",
-                "token": "WITHSCORE",
-                "type": "pure-token",
-                "optional": true
+                "type": "string",
+                "multiple": true
             }
         ]
     }

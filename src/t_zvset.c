@@ -8,34 +8,42 @@
 
 #include <strings.h>
 
-/* ZVADD key [NX|XX] [CH] score member [score member ...]
+/* ZVADD key [NX|XX] [GT|LT] [CH] [INCR] score member [score member ...]
  *
  * score is "v0#v1#...#vn" (Tair style). The storage representation is
  * the packed fbtree item; the '#' syntax is only the protocol
  * representation parsed by zvScoreParse(). */
-void zvaddCommand(client *c) {
+static void zvaddGenericCommand(client *c, int base_flags) {
     robj *key = c->argv[1];
     robj *zobj;
-    int in_flags = ZVADD_IN_NONE;
+    int in_flags = base_flags;
     int ch = 0;
     int scoreidx = 2;
     int elements;
     int j;
 
-    /* Parse optional flags. Accept NX/XX/CH in any order. */
+    /* Parse optional flags. Accept NX/XX/GT/LT/CH/INCR in any order. */
     while (scoreidx < c->argc) {
         char *opt = objectGetVal(c->argv[scoreidx]);
         if (!strcasecmp(opt, "nx")) {
             in_flags |= ZVADD_IN_NX;
         } else if (!strcasecmp(opt, "xx")) {
             in_flags |= ZVADD_IN_XX;
+        } else if (!strcasecmp(opt, "gt")) {
+            in_flags |= ZVADD_IN_GT;
+        } else if (!strcasecmp(opt, "lt")) {
+            in_flags |= ZVADD_IN_LT;
         } else if (!strcasecmp(opt, "ch")) {
             ch = 1;
+        } else if (!strcasecmp(opt, "incr")) {
+            in_flags |= ZVADD_IN_INCR;
         } else {
             break;
         }
         scoreidx++;
     }
+
+    int incr = (in_flags & ZVADD_IN_INCR) != 0;
 
     elements = c->argc - scoreidx;
     if (elements % 2 || elements <= 0) {
@@ -46,6 +54,18 @@ void zvaddCommand(client *c) {
 
     if ((in_flags & ZVADD_IN_NX) && (in_flags & ZVADD_IN_XX)) {
         addReplyError(c, "XX and NX options at the same time are not compatible");
+        return;
+    }
+    if ((in_flags & ZVADD_IN_GT) && (in_flags & ZVADD_IN_LT)) {
+        addReplyError(c, "GT and LT options at the same time are not compatible");
+        return;
+    }
+    if (((in_flags & ZVADD_IN_GT) || (in_flags & ZVADD_IN_LT)) && (in_flags & ZVADD_IN_NX)) {
+        addReplyError(c, "GT, LT, and/or NX options at the same time are not compatible");
+        return;
+    }
+    if (incr && elements > 1) {
+        addReplyError(c, "INCR option supports a single increment-element pair");
         return;
     }
 
@@ -84,10 +104,13 @@ void zvaddCommand(client *c) {
     }
     if (zobj == NULL) {
         if (in_flags & ZVADD_IN_XX) {
-            /* No key + XX: nothing to do, but still reply 0. */
+            /* No key + XX: nothing to do. */
             for (j = 0; j < elements; j++) zvScoreFree(scores[j]);
             zfree(scores);
-            addReplyLongLong(c, 0);
+            if (incr)
+                addReplyNull(c);
+            else
+                addReplyLongLong(c, 0);
             return;
         }
         zobj = createZvsetObject(dims);
@@ -103,23 +126,63 @@ void zvaddCommand(client *c) {
     }
 
     long added = 0, updated = 0;
+    int processed = 0;
+    int reply_err = 0;
+    zvScore *incr_result = NULL;
+    if (incr) incr_result = zvScoreCreate(dims);
     for (j = 0; j < elements; j++) {
         int out_flags = 0;
         sds member = objectGetVal(c->argv[scoreidx + 1 + j * 2]);
-        int ret = zvsetAdd(objectGetVal(zobj), scores[j], member, in_flags, &out_flags);
-        serverAssert(ret == C_OK);
+        if (incr) {
+            int ret = zvsetIncrBy(objectGetVal(zobj), scores[j], member, in_flags, &out_flags, incr_result);
+            if (ret != C_OK) {
+                reply_err = 1;
+                break;
+            }
+        } else {
+            int ret = zvsetAdd(objectGetVal(zobj), scores[j], member, in_flags, &out_flags);
+            serverAssert(ret == C_OK);
+        }
         if (out_flags & ZVADD_OUT_ADDED) added++;
         if (out_flags & ZVADD_OUT_UPDATED) updated++;
+        if (!(out_flags & ZVADD_OUT_NOP)) processed++;
     }
     for (j = 0; j < elements; j++) zvScoreFree(scores[j]);
     zfree(scores);
 
     if (added || updated) {
         signalModifiedKey(c, c->db, key);
-        notifyKeyspaceEvent(NOTIFY_GENERIC, "zvadd", key, c->db->id);
+        notifyKeyspaceEvent(NOTIFY_GENERIC, incr ? "zvincrby" : "zvadd", key, c->db->id);
         server.dirty += (added + updated);
     }
-    addReplyLongLong(c, ch ? added + updated : added);
+    if (reply_err) {
+        if (incr_result) zvScoreFree(incr_result);
+        addReplyError(c, "increment would produce NaN");
+    } else if (incr) {
+        if (processed) {
+            sds formatted = zvScoreFormat(incr_result);
+            addReplyBulkSds(c, formatted);
+        } else {
+            addReplyNull(c);
+        }
+        zvScoreFree(incr_result);
+    } else {
+        addReplyLongLong(c, ch ? added + updated : added);
+    }
+}
+
+void zvaddCommand(client *c) {
+    zvaddGenericCommand(c, ZVADD_IN_NONE);
+}
+
+void zvincrbyCommand(client *c) {
+    /* ZVINCRBY key increment-vector member */
+    if (c->argc != 4) {
+        addReplyErrorObject(c, shared.syntaxerr);
+        return;
+    }
+    /* Reuse the generic path: key INCR score member. */
+    zvaddGenericCommand(c, ZVADD_IN_INCR);
 }
 
 void zvremCommand(client *c) {
@@ -169,9 +232,50 @@ void zvscoreCommand(client *c) {
     addReplyBulkSds(c, formatted);
 }
 
-void zvrankCommand(client *c) {
+void zvmscoreCommand(client *c) {
     robj *key = c->argv[1];
     robj *zobj;
+
+    zobj = lookupKeyRead(c->db, key);
+    if (zobj == NULL) {
+        addReplyArrayLen(c, c->argc - 2);
+        for (int j = 2; j < c->argc; j++) {
+            addReplyNull(c);
+        }
+        return;
+    }
+    if (checkType(c, zobj, OBJ_ZVSET)) return;
+
+    zvset *zs = objectGetVal(zobj);
+    addReplyArrayLen(c, c->argc - 2);
+    for (int j = 2; j < c->argc; j++) {
+        void *entry = zvsetFind(zs, objectGetVal(c->argv[j]));
+        if (entry == NULL) {
+            addReplyNull(c);
+            continue;
+        }
+        sds formatted = zvItemFormatScore(entry);
+        addReplyBulkSds(c, formatted);
+    }
+}
+
+/* Shared RANK implementation. reverse=0 → ZVRANK, 1 → ZVREVRANK. */
+static void zvrankGenericCommand(client *c, int reverse) {
+    robj *key = c->argv[1];
+    robj *zobj;
+    int withscore = 0;
+
+    if (c->argc < 3 || c->argc > 4) {
+        addReplyErrorObject(c, shared.syntaxerr);
+        return;
+    }
+    if (c->argc == 4) {
+        if (strcasecmp(objectGetVal(c->argv[3]), "withscore")) {
+            addReplyErrorObject(c, shared.syntaxerr);
+            return;
+        }
+        withscore = 1;
+    }
 
     if ((zobj = lookupKeyReadOrReply(c, key, shared.null[c->resp])) == NULL || checkType(c, zobj, OBJ_ZVSET))
         return;
@@ -184,7 +288,23 @@ void zvrankCommand(client *c) {
     }
     long rank = fbtreeGetIndexOfItem(zs->tree, entry);
     serverAssert(rank >= 0);
+    if (reverse) rank = (long)zvsetLength(zs) - 1 - rank;
+    if (!withscore) {
+        addReplyLongLong(c, rank);
+        return;
+    }
+    addReplyArrayLen(c, 2);
     addReplyLongLong(c, rank);
+    sds formatted = zvItemFormatScore(entry);
+    addReplyBulkSds(c, formatted);
+}
+
+void zvrankCommand(client *c) {
+    zvrankGenericCommand(c, 0);
+}
+
+void zvrevrankCommand(client *c) {
+    zvrankGenericCommand(c, 1);
 }
 
 void zvrangeCommand(client *c) {

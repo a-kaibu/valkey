@@ -1,11 +1,11 @@
 {
-    "ZVRANK": {
-        "summary": "Returns the rank of a member in a ZVSET.",
+    "ZVREVRANK": {
+        "summary": "Returns the reverse rank of a member in a ZVSET.",
         "complexity": "O(log(N))",
         "group": "sorted_set",
         "since": "9.2.0",
         "arity": -3,
-        "function": "zvrankCommand",
+        "function": "zvrevrankCommand",
         "command_flags": [
             "READONLY",
             "FAST"

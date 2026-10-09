@@ -1,25 +1,26 @@
 {
-    "ZVRANK": {
-        "summary": "Returns the rank of a member in a ZVSET.",
+    "ZVINCRBY": {
+        "summary": "Increments the vector score of a member in a ZVSET.",
         "complexity": "O(log(N))",
         "group": "sorted_set",
         "since": "9.2.0",
-        "arity": -3,
-        "function": "zvrankCommand",
+        "arity": 4,
+        "function": "zvincrbyCommand",
         "command_flags": [
-            "READONLY",
+            "WRITE",
+            "DENYOOM",
             "FAST"
         ],
         "acl_categories": [
             "FAST",
-            "READ",
-            "SORTEDSET"
+            "SORTEDSET",
+            "WRITE"
         ],
         "key_specs": [
             {
                 "flags": [
-                    "RO",
-                    "ACCESS"
+                    "RW",
+                    "UPDATE"
                 ],
                 "begin_search": {
                     "index": {
@@ -38,7 +39,8 @@
         "reply_schema": {
             "oneOf": [
                 {
-                    "type": "integer"
+                    "type": "string",
+                    "description": "The updated vector score."
                 },
                 {
                     "type": "null"
@@ -52,14 +54,12 @@
                 "key_spec_index": 0
             },
             {
-                "name": "member",
+                "name": "increment",
                 "type": "string"
             },
             {
-                "name": "withscore",
-                "token": "WITHSCORE",
-                "type": "pure-token",
-                "optional": true
+                "name": "member",
+                "type": "string"
             }
         ]
     }

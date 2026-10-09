@@ -87,6 +87,47 @@ void zvScoreFree(zvScore *score) {
     zfree(score);
 }
 
+zvScore *zvScoreCreate(uint8_t len) {
+    serverAssert(len >= 1);
+    zvScore *score = zmalloc(sizeof(*score) + sizeof(double) * len);
+    score->len = len;
+    return score;
+}
+
+/* Lexicographic compare. Callers must reject mismatched dimensions first. */
+int zvScoreCompare(const zvScore *a, const zvScore *b) {
+    serverAssert(a->len == b->len);
+    for (int i = 0; i < a->len; i++) {
+        if (a->values[i] < b->values[i]) return -1;
+        if (a->values[i] > b->values[i]) return 1;
+    }
+    return 0;
+}
+
+/* Component-wise addition. NaN (e.g. +inf + -inf) aborts with C_ERR. */
+int zvScoreIncrement(zvScore *result, const zvScore *base, const zvScore *delta) {
+    serverAssert(result->len == base->len && base->len == delta->len);
+    for (int i = 0; i < base->len; i++) {
+        double v = base->values[i] + delta->values[i];
+        if (isnan(v)) return C_ERR;
+        if (v == 0.0) v = 0.0;
+        result->values[i] = v;
+    }
+    return C_OK;
+}
+
+/* Format a parsed vector as "v0#v1#...". */
+sds zvScoreFormat(const zvScore *score) {
+    sds out = sdsempty();
+    char buf[128];
+    for (int i = 0; i < score->len; i++) {
+        if (i > 0) out = sdscatlen(out, "#", 1);
+        int len = fpconv_dtoa(score->values[i], buf);
+        out = sdscatlen(out, buf, (size_t)len);
+    }
+    return out;
+}
+
 /* Create packed fbtree item: [dims:u8][sortable...][member]. */
 sds zvItemCreate(const zvScore *score, const char *member, size_t member_len) {
     size_t total = 1 + (size_t)score->len * 8 + member_len;
@@ -206,9 +247,34 @@ void *zvsetFind(zvset *zs, sds member) {
     return entry;
 }
 
+/* Replace the item referenced by the hashtable slot with a new score.
+ * The old item is deleted from the tree before the new one is inserted,
+ * then the slot pointer is updated. Returns the inserted item. */
+static sds zvsetReplaceItem(zvset *zs, void **item_ref, const zvScore *score, sds member) {
+    const_sds old_item = *item_ref;
+    sds new_item = zvItemCreate(score, member, sdslen(member));
+    serverAssert(fbtreeDelete(zs->tree, old_item));
+    sds inserted = fbtreeInsert(zs->tree, new_item);
+    *item_ref = inserted;
+    return inserted;
+}
+
+/* Read the full vector of a packed item into out (len == dims). */
+static void zvsetItemToScore(const_sds item, zvScore *out) {
+    uint8_t dims = (uint8_t)item[0];
+    serverAssert(out->len == dims);
+    for (int i = 0; i < dims; i++) {
+        uint64_t sortable;
+        memcpy(&sortable, item + 1 + (size_t)i * 8, 8);
+        out->values[i] = zvSortableToScore(sortable);
+    }
+}
+
 int zvsetAdd(zvset *zs, const zvScore *score, sds member, int in_flags, int *out_flags) {
     int nx = in_flags & ZVADD_IN_NX;
     int xx = in_flags & ZVADD_IN_XX;
+    int gt = in_flags & ZVADD_IN_GT;
+    int lt = in_flags & ZVADD_IN_LT;
 
     *out_flags = 0;
 
@@ -226,10 +292,19 @@ int zvsetAdd(zvset *zs, const zvScore *score, sds member, int in_flags, int *out
         const_sds old_item = *item_ref;
         if (zvItemScoreEquals(old_item, score)) return C_OK;
 
-        sds new_item = zvItemCreate(score, member, sdslen(member));
-        serverAssert(fbtreeDelete(zs->tree, old_item));
-        sds inserted = fbtreeInsert(zs->tree, new_item);
-        *item_ref = inserted;
+        /* GT/LT compare the full vector lexicographically. */
+        if (gt || lt) {
+            zvScore *cur = zvScoreCreate(zs->dimensions);
+            zvsetItemToScore(old_item, cur);
+            int cmp = zvScoreCompare(score, cur);
+            zvScoreFree(cur);
+            if ((gt && cmp <= 0) || (lt && cmp >= 0)) {
+                *out_flags |= ZVADD_OUT_NOP;
+                return C_OK;
+            }
+        }
+
+        zvsetReplaceItem(zs, item_ref, score, member);
         *out_flags |= ZVADD_OUT_UPDATED;
         return C_OK;
     }
@@ -240,6 +315,61 @@ int zvsetAdd(zvset *zs, const zvScore *score, sds member, int in_flags, int *out
     }
 
     sds item = zvItemCreate(score, member, sdslen(member));
+    sds inserted = fbtreeInsert(zs->tree, item);
+    serverAssert(hashtableAdd(zs->ht, inserted));
+    *out_flags |= ZVADD_OUT_ADDED;
+    return C_OK;
+}
+
+int zvsetIncrBy(zvset *zs, const zvScore *delta, sds member, int in_flags, int *out_flags, zvScore *newscore) {
+    int nx = in_flags & ZVADD_IN_NX;
+    int xx = in_flags & ZVADD_IN_XX;
+    int gt = in_flags & ZVADD_IN_GT;
+    int lt = in_flags & ZVADD_IN_LT;
+
+    *out_flags = 0;
+
+    if (delta->len != zs->dimensions || newscore->len != zs->dimensions) return C_ERR;
+
+    zsetMarkLookupKey(member);
+    void **item_ref = hashtableFindRef(zs->ht, member);
+    zsetUnmarkLookupKey(member);
+
+    if (item_ref != NULL) {
+        if (nx) {
+            *out_flags |= ZVADD_OUT_NOP;
+            return C_OK;
+        }
+        zvScore *cur = zvScoreCreate(zs->dimensions);
+        zvsetItemToScore(*item_ref, cur);
+        if (zvScoreIncrement(newscore, cur, delta) != C_OK) {
+            zvScoreFree(cur);
+            return C_ERR;
+        }
+        int cmp = zvScoreCompare(newscore, cur);
+        zvScoreFree(cur);
+        if ((gt && cmp <= 0) || (lt && cmp >= 0)) {
+            *out_flags |= ZVADD_OUT_NOP;
+            return C_OK;
+        }
+        /* Skip delete/insert when the result is identical. */
+        if (zvItemScoreEquals(*item_ref, newscore)) return C_OK;
+        zvsetReplaceItem(zs, item_ref, newscore, member);
+        *out_flags |= ZVADD_OUT_UPDATED;
+        return C_OK;
+    }
+
+    if (xx) {
+        *out_flags |= ZVADD_OUT_NOP;
+        return C_OK;
+    }
+
+    /* Missing member starts from the zero vector. */
+    for (int i = 0; i < delta->len; i++) {
+        if (isnan(delta->values[i])) return C_ERR;
+        newscore->values[i] = delta->values[i] == 0.0 ? 0.0 : delta->values[i];
+    }
+    sds item = zvItemCreate(newscore, member, sdslen(member));
     sds inserted = fbtreeInsert(zs->tree, item);
     serverAssert(hashtableAdd(zs->ht, inserted));
     *out_flags |= ZVADD_OUT_ADDED;
