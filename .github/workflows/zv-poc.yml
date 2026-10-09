@@ -84,10 +84,11 @@ jobs:
         run: make -j"$(nproc)"
       - name: Run ZV benchmark
         run: |
+          set -euo pipefail
           ./src/valkey-server --port 7778 --daemonize yes --save '' --appendonly no --logfile /tmp/zv-bench.log
           sleep 1
           tclsh utils/zv_benchmark.tcl --port 7778 --n "$BENCH_N" --dims "$BENCH_DIMS" --out /tmp/zv-bench.tsv --json /tmp/zv-bench.jsonl | tee /tmp/zv-bench.txt
-          if [ "$BENCH_SET" = "all" ]; then
+          if [ "${BENCH_SET:-basic}" = "all" ]; then
             # Extended scripts run capped at N=100K to bound CI time.
             if [ "$BENCH_N" -gt 100000 ]; then EXTRA_N=100000; else EXTRA_N="$BENCH_N"; fi
             tclsh utils/zv_range_benchmark.tcl --port 7778 --n "$EXTRA_N" --out /tmp/zv-range-bench.tsv --json /tmp/zv-range-bench.jsonl | tee -a /tmp/zv-bench.txt
@@ -96,6 +97,21 @@ jobs:
             tclsh utils/zv_query_benchmark.tcl --port 7778 --n "$EXTRA_N" --out /tmp/zv-query-bench.tsv --json /tmp/zv-query-bench.jsonl | tee -a /tmp/zv-bench.txt
           fi
           ./src/valkey-cli -p 7778 SHUTDOWN NOSAVE || true
+      - name: Verify benchmark completion
+        run: |
+          set -euo pipefail
+          test -s /tmp/zv-bench.tsv
+          test -s /tmp/zv-bench.jsonl
+          grep -q "medians over repeats" /tmp/zv-bench.txt
+          grep -q "reps 5" /tmp/zv-bench.tsv
+          python3 -c "import json;[json.loads(l) for l in open('/tmp/zv-bench.jsonl')]"
+          if [ "${BENCH_SET:-basic}" = "all" ]; then
+            for f in range pop setops query; do
+              test -s /tmp/zv-bench-$f.tsv
+              test -s /tmp/zv-bench-$f.jsonl
+              grep -q "medians over repeats" /tmp/zv-bench.txt
+            done
+          fi
       - name: Publish summary
         if: always()
         run: |

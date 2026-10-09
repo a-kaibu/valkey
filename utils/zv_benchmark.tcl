@@ -48,6 +48,30 @@ proc zadd_cmd {key g i} {
     return [list ZADD $key [format %.2f $v] [zvbench::member $i]]
 }
 
+# Bulk-phase generators (run_batches builds "$gen $index" per command,
+# so no phase ever buffers all N commands at once).
+proc zvhot_cmd {key dims dist i} {
+    set h [expr {$i % 100}]
+    return [list ZVADD $key [zvbench::genvec $h $dims 2 $dist] [zvbench::member $h]]
+}
+
+proc zvflag_cmd {key dims g dist flag i} {
+    set m [zvbench::member $i]
+    set v [zvbench::genvec $i $dims $g $dist]
+    if {$flag eq ""} {
+        return [list ZVADD $key $v $m]
+    }
+    return [list ZVADD $key $flag $v $m]
+}
+
+proc zvincr_cmd {key dims g dist i} {
+    return [list ZVINCRBY $key [zvbench::genvec $i $dims $g $dist] [zvbench::member $i]]
+}
+
+proc zvremhalf_cmd {key i} {
+    return [list ZVREM $key [zvbench::member [expr {$i * 2}]]]
+}
+
 set fd [zvbench::connect $opt(port)]
 set N $opt(n)
 set B $opt(batch)
@@ -84,34 +108,22 @@ lassign $cond dist dims
         zvbench::row $dims $dist ZVADD-noop $med "" ""
 
         # Hot members: 100 members updated round-robin (cache-resident).
-        set hot {}
-        for {set i 0} {$i < $N} {incr i} {
-            lappend hot [list ZVADD $key [zvbench::genvec [expr {$i % 100}] $dims 2 $dist] \
-                [zvbench::member [expr {$i % 100}]]]
-        }
-        set ms [zvbench::pipeline $fd $hot]
-        puts [format "%-8s dims=%-3s ZVADD-hot      median %10.0f ops/sec" $dist $dims [expr {$N / ($ms / 1000.0)}]]
-        zvbench::row $dims $dist ZVADD-hot [expr {$N / ($ms / 1000.0)}] "" ""
+        lassign [zvbench::run_batches $fd $N $B [list zvhot_cmd $key $dims $dist]] med tot nb
+        puts [format "%-8s dims=%-3s ZVADD-hot      median %10.0f ops/sec (total %10.0f, %d batches)" \
+            $dist $dims $med $tot $nb]
+        zvbench::row $dims $dist ZVADD-hot $med "" ""
 
         # Flag / INCR variants over all members.
-        set nxcmds {}
-        set xxcmds {}
-        set gtcmds {}
-        set incrcmds {}
-        for {set i 0} {$i < $N} {incr i} {
-            set m [zvbench::member $i]
-            set v [zvbench::genvec $i $dims 3 $dist]
-            lappend nxcmds [list ZVADD $key NX $v $m]
-            lappend xxcmds [list ZVADD $key XX $v $m]
-            lappend gtcmds [list ZVADD $key GT $v $m]
-            lappend incrcmds [list ZVINCRBY $key $v $m]
+        foreach {name flag g} {ZVADD-NX NX 3 ZVADD-XX XX 3 ZVADD-GT GT 3} {
+            lassign [zvbench::run_batches $fd $N $B [list zvflag_cmd $key $dims $g $dist $flag]] med tot nb
+            puts [format "%-8s dims=%-3s %-12s median %10.0f ops/sec (total %10.0f, %d batches)" \
+                $dist $dims $name $med $tot $nb]
+            zvbench::row $dims $dist $name $med "" ""
         }
-        foreach {name cmds} [list ZVADD-NX $nxcmds ZVADD-XX $xxcmds ZVADD-GT $gtcmds ZVINCRBY $incrcmds] {
-            set ms [zvbench::pipeline $fd $cmds]
-            set ops [expr {$N / ($ms / 1000.0)}]
-            puts [format "%-8s dims=%-3s %-12s %10.0f ops/sec" $dist $dims $name $ops]
-            zvbench::row $dims $dist $name $ops "" ""
-        }
+        lassign [zvbench::run_batches $fd $N $B [list zvincr_cmd $key $dims 3 $dist]] med tot nb
+        puts [format "%-8s dims=%-3s %-12s median %10.0f ops/sec (total %10.0f, %d batches)" \
+            $dist $dims ZVINCRBY $med $tot $nb]
+        zvbench::row $dims $dist ZVINCRBY $med "" ""
 
         # Point lookups.
         set S $opt(samples)
@@ -166,15 +178,12 @@ lassign $cond dist dims
             zvbench::row $dims $dist $name [expr {100 / ($ms / 1000.0)}] "" ""
         }
 
-        # ZVREM: delete half, then the rest (fresh reload per half avoided;
-        # reload once at the end for memory accounting only if needed).
-        set remcmds {}
-        for {set i 0} {$i < $N} {incr i 2} {
-            lappend remcmds [list ZVREM $key [zvbench::member $i]]
-        }
-        set ms [zvbench::pipeline $fd $remcmds]
-        puts [format "%-8s dims=%-3s %-12s %10.0f ops/sec" $dist $dims ZVREM [expr {[llength $remcmds] / ($ms / 1000.0)}]]
-        zvbench::row $dims $dist ZVREM [expr {[llength $remcmds] / ($ms / 1000.0)}] "" ""
+        # ZVREM: delete half (even members), batched.
+        set half [expr {($N + 1) / 2}]
+        lassign [zvbench::run_batches $fd $half $B [list zvremhalf_cmd $key]] med tot nb
+        puts [format "%-8s dims=%-3s %-12s median %10.0f ops/sec (total %10.0f, %d batches)" \
+            $dist $dims ZVREM $med $tot $nb]
+        zvbench::row $dims $dist ZVREM $med "" ""
 
         # Memory accounting on a full key: reload, then sample.
         zvbench::isolate_key $fd $key
