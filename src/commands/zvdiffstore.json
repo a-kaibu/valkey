@@ -1,0 +1,128 @@
+{
+    "ZVDIFFSTORE": {
+        "summary": "Stores the difference of multiple ZVSETs.",
+        "complexity": "O(N*K)",
+        "group": "sorted_set",
+        "since": "9.2.0",
+        "command_flags": [
+            "WRITE",
+            "DENYOOM"
+        ],
+        "acl_categories": [
+            "SLOW",
+            "SORTEDSET",
+            "WRITE"
+        ],
+        "arity": -4,
+        "function": "zvdiffstoreCommand",
+        "reply_schema": {
+            "type": "integer",
+            "description": "The number of members stored."
+        },
+        "arguments": [
+            {
+                "name": "destination",
+                "type": "key",
+                "key_spec_index": 0
+            },
+            {
+                "name": "numkeys",
+                "type": "integer"
+            },
+            {
+                "name": "key",
+                "type": "key",
+                "key_spec_index": 1,
+                "multiple": true
+            },
+            {
+                "name": "weights",
+                "type": "block",
+                "optional": true,
+                "arguments": [
+                    {
+                        "name": "weight-token",
+                        "token": "WEIGHTS",
+                        "type": "pure-token"
+                    },
+                    {
+                        "name": "weight",
+                        "type": "double",
+                        "multiple": true
+                    }
+                ]
+            },
+            {
+                "name": "aggregate",
+                "type": "block",
+                "optional": true,
+                "arguments": [
+                    {
+                        "name": "aggregate-token",
+                        "token": "AGGREGATE",
+                        "type": "pure-token"
+                    },
+                    {
+                        "name": "op",
+                        "type": "oneof",
+                        "arguments": [
+                            {
+                                "name": "sum",
+                                "token": "SUM",
+                                "type": "pure-token"
+                            },
+                            {
+                                "name": "min",
+                                "token": "MIN",
+                                "type": "pure-token"
+                            },
+                            {
+                                "name": "max",
+                                "token": "MAX",
+                                "type": "pure-token"
+                            }
+                        ]
+                    }
+                ]
+            }
+        ],
+        "key_specs": [
+            {
+                "flags": [
+                    "OW",
+                    "UPDATE"
+                ],
+                "begin_search": {
+                    "index": {
+                        "pos": 1
+                    }
+                },
+                "find_keys": {
+                    "range": {
+                        "lastkey": 0,
+                        "step": 1,
+                        "limit": 0
+                    }
+                }
+            },
+            {
+                "flags": [
+                    "RO",
+                    "ACCESS"
+                ],
+                "begin_search": {
+                    "index": {
+                        "pos": 2
+                    }
+                },
+                "find_keys": {
+                    "keynum": {
+                        "keynumidx": 0,
+                        "firstkey": 1,
+                        "step": 1
+                    }
+                }
+            }
+        ]
+    }
+}

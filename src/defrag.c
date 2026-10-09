@@ -40,6 +40,8 @@
 
 #include "server.h"
 #include "ordered_index.h"
+#include "zvset.h"
+#include "fbtree.h"
 #include "hashtable.h"
 #include "eval.h"
 #include "script.h"
@@ -452,6 +454,44 @@ static void defragZset(robj *ob) {
     }
 }
 
+/* Callback for fbtreeDefragScan — when a packed zvset item is
+ * relocated, update the companion hashtable's pointer to it. */
+static void defragZvsetItemCallback(sds old_item, sds new_item, void *privdata) {
+    hashtable *ht = privdata;
+    bool replaced = hashtableReplaceReallocatedEntry(ht, old_item, new_item);
+    serverAssert(replaced);
+    server.stat_active_defrag_scanned++;
+}
+
+static void scanLaterZvset(robj *ob, unsigned long *cursor) {
+    serverAssert(ob->type == OBJ_ZVSET && ob->encoding == OBJ_ENCODING_BTREE);
+    zvset *zs = (zvset *)objectGetVal(ob);
+    *cursor = fbtreeDefragScan(zs->tree, *cursor, defragZvsetItemCallback, zs->ht, activeDefragAlloc);
+}
+
+static void defragZvset(robj *ob) {
+    serverAssert(ob->type == OBJ_ZVSET && ob->encoding == OBJ_ENCODING_BTREE);
+    zvset *zs = (zvset *)objectGetVal(ob);
+
+    zvset *newzs;
+    if ((newzs = activeDefragAlloc(zs))) {
+        objectSetVal(ob, newzs);
+        zs = newzs;
+    }
+
+    hashtable *newtable;
+    if ((newtable = hashtableDefragTables(zs->ht, activeDefragAlloc))) zs->ht = newtable;
+
+    if (hashtableSize(zs->ht) > server.active_defrag_max_scan_fields)
+        defragLater(ob);
+    else {
+        unsigned long cursor = 0;
+        do {
+            cursor = fbtreeDefragScan(zs->tree, cursor, defragZvsetItemCallback, zs->ht, activeDefragAlloc);
+        } while (cursor != 0);
+    }
+}
+
 /* Defragment a hash object.
  *
  * Large hashtable-encoded hashes are deferred via `defrag_later`.
@@ -709,6 +749,12 @@ static void defragKey(defragKeysCtx *ctx, robj **elemref) {
         } else {
             serverPanic("Unknown sorted set encoding");
         }
+    } else if (ob->type == OBJ_ZVSET) {
+        if (ob->encoding == OBJ_ENCODING_BTREE) {
+            defragZvset(ob);
+        } else {
+            serverPanic("Unknown zvset encoding");
+        }
     } else if (ob->type == OBJ_HASH) {
         defragHash(ob);
     } else if (ob->type == OBJ_STREAM) {
@@ -782,6 +828,8 @@ static int defragLaterItem(robj *ob, unsigned long *cursor, monotime endtime, in
             scanLaterSet(ob, cursor);
         } else if (ob->type == OBJ_ZSET && ob->encoding == OBJ_ENCODING_BTREE) {
             scanLaterZset(ob, cursor);
+        } else if (ob->type == OBJ_ZVSET && ob->encoding == OBJ_ENCODING_BTREE) {
+            scanLaterZvset(ob, cursor);
         } else if (ob->type == OBJ_HASH && ob->encoding == OBJ_ENCODING_HASHTABLE) {
             scanLaterHash(ob, cursor);
         } else if (ob->type == OBJ_STREAM && ob->encoding == OBJ_ENCODING_STREAM) {

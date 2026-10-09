@@ -131,6 +131,7 @@ enum RdbType {
     RDB_TYPE_STREAM_LISTPACKS_3 = 21,
     RDB_TYPE_HASH_2 = 22,    /* Hash with field-level expiration, RDB 80 (9.0) */
     RDB_TYPE_PATH_HASH = 23, /* Path hash paths with field/value payloads, RDB 81 (9.2) */
+    RDB_TYPE_ZVSET = 24,     /* ZVSET vector sorted set (PoC) */
     RDB_TYPE_LAST
 };
 /* NOTE: WHEN ADDING NEW RDB TYPE, UPDATE rdb_type_string[] */

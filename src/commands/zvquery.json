@@ -1,0 +1,99 @@
+{
+    "ZVQUERY": {
+        "summary": "Experimental multi-dimensional conditional scan over a ZVSET (full-scan reference).",
+        "complexity": "O(N*F) where N is the cardinality and F the filter count.",
+        "group": "sorted_set",
+        "since": "9.2.0",
+        "arity": -2,
+        "function": "zvqueryCommand",
+        "command_flags": [
+            "READONLY"
+        ],
+        "acl_categories": [
+            "READ",
+            "SORTEDSET",
+            "SLOW"
+        ],
+        "key_specs": [
+            {
+                "flags": [
+                    "RO",
+                    "ACCESS"
+                ],
+                "begin_search": {
+                    "index": {
+                        "pos": 1
+                    }
+                },
+                "find_keys": {
+                    "range": {
+                        "lastkey": 0,
+                        "step": 1,
+                        "limit": 0
+                    }
+                }
+            }
+        ],
+        "reply_schema": {
+            "type": "array"
+        },
+        "arguments": [
+            {
+                "name": "key",
+                "type": "key",
+                "key_spec_index": 0
+            },
+            {
+                "name": "filter",
+                "type": "block",
+                "multiple": true,
+                "optional": true,
+                "arguments": [
+                    {
+                        "name": "filter-token",
+                        "token": "FILTER",
+                        "type": "pure-token"
+                    },
+                    {
+                        "name": "dimension",
+                        "type": "integer"
+                    },
+                    {
+                        "name": "min",
+                        "type": "string"
+                    },
+                    {
+                        "name": "max",
+                        "type": "string"
+                    }
+                ]
+            },
+            {
+                "name": "limit",
+                "type": "block",
+                "optional": true,
+                "arguments": [
+                    {
+                        "name": "limit-token",
+                        "token": "LIMIT",
+                        "type": "pure-token"
+                    },
+                    {
+                        "name": "offset",
+                        "type": "integer"
+                    },
+                    {
+                        "name": "count",
+                        "type": "integer"
+                    }
+                ]
+            },
+            {
+                "name": "withscores",
+                "token": "WITHSCORES",
+                "type": "pure-token",
+                "optional": true
+            }
+        ]
+    }
+}

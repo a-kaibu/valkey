@@ -29,7 +29,8 @@ TEST_F(CmdFlagsTest, TestWriteFirstkeyOnly) {
      *   - commands which should be write firstkey only are detected. */
     const char *const writeFirstkeyCommands[] = {
         "bitop", "geosearchstore", "pfmerge", "sdiffstore", "sinterstore",
-        "sunionstore", "zdiffstore", "zinterstore", "zrangestore", "zunionstore"};
+        "sunionstore", "zdiffstore", "zinterstore", "zrangestore", "zunionstore",
+        "zvdiffstore", "zvinterstore", "zvrangestore", "zvunionstore"};
     int expectedCount = sizeof(writeFirstkeyCommands) / sizeof(char *);
 
     int count = 0;

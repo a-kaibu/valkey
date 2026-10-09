@@ -810,7 +810,8 @@ typedef enum {
 #define OBJ_MODULE 5    /* Module object. */
 #define OBJ_STREAM 6    /* Stream object. */
 #define OBJ_PATH_HASH 7 /* Path hash object. */
-#define OBJ_TYPE_MAX 8  /* Maximum number of object types */
+#define OBJ_ZVSET 8     /* Vector sorted set object (PoC). */
+#define OBJ_TYPE_MAX 9  /* Maximum number of object types */
 
 typedef struct ValkeyModuleType moduleType;
 
@@ -1598,6 +1599,10 @@ typedef struct zset {
     hashtable *ht;
     OrderedIndex *oi;
 } zset;
+
+/* ZVSET (PoC): native multi-score sorted set backed directly by fbtree.
+ * Must stay independent from OrderedIndex (see PoC instructions). */
+typedef struct zvset zvset;
 
 /* Lookup-key marking for fbtree hashtable disambiguation.
  * Packed fbtree items ([score][ele]) are stored in the hashtable. When doing
@@ -3000,6 +3005,7 @@ extern hashtableType objectHashtableType;
 extern dictType objectKeyHeapPointerValueDictType;
 extern hashtableType setHashtableType;
 extern hashtableType zsetHashtableType;
+uint64_t genHashFunctionConfigurableSeed(const char *buf, size_t len);
 extern hashtableType kvstoreKeysHashtableType;
 extern hashtableType kvstoreExpiresHashtableType;
 extern double R_Zero, R_PosInf, R_NegInf, R_Nan;
@@ -3344,6 +3350,8 @@ robj *createHashObject(void);
 robj *createPathHashObject(void);
 robj *createZsetObject(void);
 robj *createZsetListpackObject(void);
+robj *createZvsetObject(uint8_t dimensions);
+void freeZvsetObject(robj *o);
 robj *createStreamObject(void);
 robj *createModuleObject(moduleType *mt, void *value);
 int getLongFromObjectOrReply(client *c, robj *o, long *target, const char *msg);
@@ -3632,6 +3640,8 @@ int zsetScore(robj *zobj, sds member, double *score);
 int zsetAdd(robj *zobj, double score, sds ele, int in_flags, int *out_flags, double *newscore);
 int zsetDel(robj *zobj, sds ele);
 robj *zsetDup(robj *o);
+robj *zvsetDup(robj *o);
+unsigned long zvsetObjectLength(const robj *zobj);
 void genericZpopCommand(client *c,
                         robj **keyv,
                         int keyc,
@@ -3825,6 +3835,7 @@ robj *pathHashTypeDup(robj *o);
 size_t pathHashTypeMemUsage(robj *o, size_t sample_size);
 void pathHashTypeDigest(unsigned char *digest, robj *o);
 int rewritePathHashObject(rio *r, robj *key, robj *o);
+int rewriteZvsetObject(rio *r, robj *key, robj *o);
 void phsetCommand(client *c);
 void phmsetCommand(client *c);
 void phgetCommand(client *c);
@@ -4318,7 +4329,46 @@ void zmpopCommand(client *c);
 void bzpopminCommand(client *c);
 void bzpopmaxCommand(client *c);
 void bzmpopCommand(client *c);
+void bzvpopminCommand(client *c);
+void bzvpopmaxCommand(client *c);
+void bzvmpopCommand(client *c);
 void zrandmemberCommand(client *c);
+void zvaddCommand(client *c);
+void zvincrbyCommand(client *c);
+void zvremCommand(client *c);
+void zvscoreCommand(client *c);
+void zvmscoreCommand(client *c);
+void zvrankCommand(client *c);
+void zvrevrankCommand(client *c);
+void zvrangeCommand(client *c);
+void zvrevrangeCommand(client *c);
+void zvrangebyscoreCommand(client *c);
+void zvrevrangebyscoreCommand(client *c);
+void zvrangebylexCommand(client *c);
+void zvrevrangebylexCommand(client *c);
+void zvrangestoreCommand(client *c);
+void zvremrangebyrankCommand(client *c);
+void zvremrangebyscoreCommand(client *c);
+void zvremrangebylexCommand(client *c);
+void zvpopminCommand(client *c);
+void zvpopmaxCommand(client *c);
+void zvmpopCommand(client *c);
+void bzvpopminCommand(client *c);
+void bzvpopmaxCommand(client *c);
+void bzvmpopCommand(client *c);
+void zvrandmemberCommand(client *c);
+void zvscanCommand(client *c);
+void zvqueryCommand(client *c);
+void zvunionCommand(client *c);
+void zvunionstoreCommand(client *c);
+void zvinterCommand(client *c);
+void zvinterstoreCommand(client *c);
+void zvdiffCommand(client *c);
+void zvdiffstoreCommand(client *c);
+void zvintercardCommand(client *c);
+void zvcountCommand(client *c);
+void zvlexcountCommand(client *c);
+void zvcardCommand(client *c);
 void multiCommand(client *c);
 void execCommand(client *c);
 void discardCommand(client *c);

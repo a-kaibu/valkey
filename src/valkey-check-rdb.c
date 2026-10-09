@@ -30,6 +30,7 @@
 #include "mt19937-64.h"
 #include "server.h"
 #include "ordered_index.h"
+#include "zvset.h"
 #include "rdb.h"
 #include "module.h"
 #include "cluster.h"
@@ -166,12 +167,13 @@ char *rdb_type_string[] = {
     "stream-v3",
     "hash-volatile-items",
     "pathhash",
+    "zvset",
 };
 
 static_assert(sizeof(rdb_type_string) / sizeof(rdb_type_string[0]) == RDB_TYPE_LAST, "Mismatch between enum and string table");
 
 char *type_name[OBJ_TYPE_MAX] = {"string", "list", "set", "zset", "hash", "module", /* module type is special */
-                                 "stream", "pathhash"};
+                                 "stream", "pathhash", "zvset"};
 
 /********************** Rdb stats **********************/
 void statsRecordCount(size_t eleCount, rdbStats *stats) {
@@ -412,6 +414,9 @@ void computeDatasetProfile(int dbid, robj *keyobj, robj *o, long long expiretime
         }
         raxStop(&paths);
         statsRecordCount(raxSize(path_hash->index), stats);
+    } else if (o->type == OBJ_ZVSET) {
+        /* PoC: count only, sizes approximated via hashtable walk is skipped. */
+        statsRecordCount(hashtableSize(((zvset *)objectGetVal(o))->ht), stats);
     } else if (o->type == OBJ_MODULE) {
         statsRecordCount(1, stats);
     } else {
