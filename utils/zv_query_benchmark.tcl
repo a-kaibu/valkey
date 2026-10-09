@@ -65,8 +65,8 @@ foreach f {100 10 1 0.1 0.01} {
     set hi [format %.2f [expr {50.0 + $span / 2}]]
     lassign [time_query $fd $key FILTER 0 $lo $hi] us m
     puts [format "sel=%-5s%% dim0 M=%-7d %8.1f ms" $f $m [expr {$us / 1000.0}]]
-    zvbench::row $dims spread QUERY-sel$f [expr {$m / ($us / 1000000.0)}] "" "" \
-        [dict create selectivity $f matched $m scanned $N]
+    zvbench::row $dims spread QUERY-sel$f [expr {1000000.0 / $us}] "" "" \
+        [dict create selectivity $f matched $m scanned $N latency_us [expr {$us / 1000.0}]]
 }
 
 # Filter count sweep: 10% window per dimension, independent dims, so
@@ -79,24 +79,24 @@ for {set nf 1} {$nf <= 5} {incr nf} {
     }
     lassign [time_query $fd {*}$q] us m
     puts [format "filters=%d M=%-7d %8.1f ms" $nf $m [expr {$us / 1000.0}]]
-    zvbench::row $dims spread QUERY-F$nf [expr {$m / ($us / 1000000.0)}] "" "" \
-        [dict create filters $nf matched $m scanned $N]
+    zvbench::row $dims spread QUERY-F$nf [expr {1000000.0 / $us}] "" "" \
+        [dict create filters $nf matched $m scanned $N latency_us [expr {$us / 1000.0}]]
 }
 
 # Target dimension: first vs last (same selectivity window).
 foreach {label dim} [list first 0 last [expr {$dims - 1}]] {
     lassign [time_query $fd $key FILTER $dim 49.5 50.5] us m
     puts [format "dim-%-5s M=%-7d %8.1f ms" $label $m [expr {$us / 1000.0}]]
-    zvbench::row $dims spread QUERY-dim-$label [expr {$m / ($us / 1000000.0)}] "" "" \
-        [dict create matched $m scanned $N]
+    zvbench::row $dims spread QUERY-dim-$label [expr {1000000.0 / $us}] "" "" \
+        [dict create matched $m scanned $N latency_us [expr {$us / 1000.0}]]
 }
 
 # LIMIT effect on a 10% query.
 foreach lim {10 100 1000} {
     lassign [time_query $fd $key FILTER 0 45 55 LIMIT 0 $lim] us m
     puts [format "limit=%-4d M=%-7d %8.1f ms" $lim $m [expr {$us / 1000.0}]]
-    zvbench::row $dims spread QUERY-limit$lim [expr {$m / ($us / 1000000.0)}] "" "" \
-        [dict create limit $lim matched $m scanned $N]
+    zvbench::row $dims spread QUERY-limit$lim [expr {1000000.0 / $us}] "" "" \
+        [dict create limit $lim matched $m scanned $N latency_us [expr {$us / 1000.0}]]
 }
 } ;# end repeat loop
 

@@ -6,11 +6,10 @@
         "since": "9.2.0",
         "command_flags": [
             "WRITE",
-            "DENYOOM",
-            "FAST"
+            "DENYOOM"
         ],
         "acl_categories": [
-            "FAST",
+            "SLOW",
             "SORTEDSET",
             "WRITE"
         ],

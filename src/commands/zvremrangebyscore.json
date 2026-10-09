@@ -7,11 +7,10 @@
         "arity": 4,
         "function": "zvremrangebyscoreCommand",
         "command_flags": [
-            "WRITE",
-            "FAST"
+            "WRITE"
         ],
         "acl_categories": [
-            "FAST",
+            "SLOW",
             "SORTEDSET",
             "WRITE"
         ],

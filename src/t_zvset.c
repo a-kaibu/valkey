@@ -1610,6 +1610,7 @@ void zvrandmemberCommand(client *c) {
                 sds formatted = zvItemFormatScore(item);
                 addReplyBulkSds(c, formatted);
             }
+            if (c->flag.close_asap) break;
         }
         zfree(ranks);
         return;
@@ -1638,6 +1639,7 @@ void zvrandmemberCommand(client *c) {
             sds formatted = zvItemFormatScore(item);
             addReplyBulkSds(c, formatted);
         }
+        if (c->flag.close_asap) break;
     }
     zvRankMapFree(map);
 }

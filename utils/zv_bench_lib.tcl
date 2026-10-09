@@ -262,13 +262,17 @@ namespace eval zvbench {
 
     # Collapse per-repeat rows into median rows. Grouped by
     # {dims dist op} plus the stable condition keys in extra (K,
-    # overlap, M, ...); volatile measurement keys (memory_bytes,
-    # elapsed_ms) are excluded so repeats of one condition always
-    # collapse into a single median. ops/p50/p99 take
+    # overlap, M, ...); volatile measurement keys are excluded from
+    # the key and instead collapsed to medians, so repeats of one
+    # condition always merge into a single median row. ops/p50/p99 take
     # medians, min/max go to extra as rep_min/rep_max with repeat count.
     # Preserves the first-seen condition order.
+    #
+    # Volatile keys: memory_bytes (allocator noise), elapsed_ms and
+    # latency_us (per-repeat timings).
     proc collapse_results {} {
         variable results
+        set volatile_keys {memory_bytes elapsed_ms latency_us}
         array set g {}
         set order {}
         foreach r $results {
@@ -276,7 +280,7 @@ namespace eval zvbench {
             set keyparts [list $dims $dist $op]
             # Stable condition keys, sorted for determinism.
             foreach k [lsort [dict keys $extra]] {
-                if {$k eq "memory_bytes" || $k eq "elapsed_ms"} continue
+                if {$k in $volatile_keys} continue
                 lappend keyparts $k [dict get $extra $k]
             }
             set k [join $keyparts "\t"]
@@ -287,6 +291,7 @@ namespace eval zvbench {
                 set g($k,p50) {}
                 set g($k,p99) {}
                 set g($k,elapsed) {}
+                set g($k,latency) {}
                 set g($k,extra) $extra
                 set g($k,dims) $dims
                 set g($k,dist) $dist
@@ -299,6 +304,9 @@ namespace eval zvbench {
             if {[dict exists $extra elapsed_ms]} {
                 lappend g($k,elapsed) [dict get $extra elapsed_ms]
             }
+            if {[dict exists $extra latency_us]} {
+                lappend g($k,latency) [dict get $extra latency_us]
+            }
         }
         set out {}
         foreach k $order {
@@ -310,6 +318,9 @@ namespace eval zvbench {
             dict set extra reps $g($k,n)
             if {[llength $g($k,elapsed)] > 0} {
                 dict set extra elapsed_ms [percentile [lsort -real $g($k,elapsed)] 0.50]
+            }
+            if {[llength $g($k,latency)] > 0} {
+                dict set extra latency_us [percentile [lsort -real $g($k,latency)] 0.50]
             }
             set p50 ""
             set p99 ""

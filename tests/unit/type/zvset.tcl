@@ -832,8 +832,7 @@ start_server {tags {"zvset-setops"}} {    proc zv_setup_setops {} {
         assert_error "*negative*" {r zvintercard 2 a{zvs} b{zvs} limit -1}
     }
 
-    test "ZVUNIONSTORE INTERSTORE DIFFSTORE" {
-        zv_setup_setops
+    test "ZVUNIONSTORE INTERSTORE DIFFSTORE" {        zv_setup_setops
         assert_equal 4 [r zvunionstore u{zvs} 2 a{zvs} b{zvs}]
         assert_equal {carol dave alice bob} [r zvrange u{zvs} 0 -1]
         assert_equal 2 [r zvinterstore v{zvs} 2 a{zvs} b{zvs}]
@@ -854,6 +853,51 @@ start_server {tags {"zvset-setops"}} {    proc zv_setup_setops {} {
         # wrong type
         r set s{zvs} str
         assert_error "*WRONGTYPE*" {r zvunion 2 a{zvs} s{zvs}}
+    }
+
+    test "ZVUNION inf weights and NaN normalization" {
+        zv_setup_setops
+        # +inf and -inf weights on the same member: NaN normalizes to 0
+        # (0*inf weights apply first: bob=[20,0]*inf=[inf,0], then SUM
+        # with [30,0] keeps [inf,0]; alice=[inf,inf]+[-inf,-inf]=[0,0]).
+        assert_equal {dave 4#9 bob inf#0 alice inf#inf carol inf#inf} \
+            [r zvunion 2 a{zvs} b{zvs} weights inf 1 withscores]
+        # +inf and -inf weights on the same member: NaN normalizes to 0
+        r zvunionstore tmp{zvs} 2 a{zvs} a{zvs} weights inf -inf
+        assert_equal {0#0} [r zvscore tmp{zvs} alice]
+        r del tmp{zvs}
+    }
+
+    test "ZV command flags match ZSET classification" {
+        foreach {cmd wantreadonly wantslow wantwrite} {
+            zvunion 1 1 0
+            zvinter 1 1 0
+            zvdiff 1 1 0
+            zvintercard 1 1 0
+            zvunionstore 0 1 1
+            zvinterstore 0 1 1
+            zvdiffstore 0 1 1
+            zvmpop 0 1 1
+            zvremrangebyrank 0 1 1
+            zvremrangebyscore 0 1 1
+            zvremrangebylex 0 1 1
+        } {
+            set info [lindex [r command info $cmd] 0]
+            set flags [lindex $info 2]
+            set acl [lindex $info 6]
+            assert_equal $wantreadonly [expr {[lsearch -exact $flags readonly] >= 0}]
+            assert_equal $wantslow [expr {[lsearch -exact $acl @slow] >= 0}]
+            assert_equal $wantwrite [expr {[lsearch -exact $flags write] >= 0}]
+        }
+    }
+
+    test "ZV read-only ACL user can run setops reads" {
+        r acl setuser zvreader on nopass +@read ~* -@write -@connection
+        assert_equal {OK} [r acl dryrun zvreader zvunion 2 a{zvs} b{zvs}]
+        assert_equal {OK} [r acl dryrun zvreader zvintercard 2 a{zvs} b{zvs}]
+        assert_match "*no permissions*" [r acl dryrun zvreader zvadd k 1#1 m]
+        assert_match "*no permissions*" [r acl dryrun zvreader zvunionstore d 1 a{zvs}]
+        r acl deluser zvreader
     }
 }
 

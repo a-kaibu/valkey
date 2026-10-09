@@ -5,14 +5,12 @@
         "group": "sorted_set",
         "since": "9.2.0",
         "command_flags": [
-            "WRITE",
-            "DENYOOM",
-            "FAST"
+            "READONLY"
         ],
         "acl_categories": [
-            "FAST",
-            "SORTEDSET",
-            "WRITE"
+            "READ",
+            "SLOW",
+            "SORTEDSET"
         ],
         "arity": -3,
         "function": "zvdiffCommand",
