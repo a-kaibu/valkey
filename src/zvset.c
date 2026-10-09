@@ -208,8 +208,8 @@ void zvScoreRanks(zvset *zs, const_sds lower, const_sds upper, unsigned long *lo
     if (*lo > *hi) *lo = *hi;
 }
 
-void zvIterateRange(zvset *zs, unsigned long lo, unsigned long hi, int reverse, long offset, long count,
-                    zvRangeEmit emit, void *ctx) {    if (lo >= hi) return;
+void zvIterateRange(zvset *zs, unsigned long lo, unsigned long hi, int reverse, long offset, long count, zvRangeEmit emit, void *ctx) {
+    if (lo >= hi) return;
     if (offset < 0) offset = 0;
     fbtreeIterator it;
     fbtreeInitIterator(&it, zs->tree);

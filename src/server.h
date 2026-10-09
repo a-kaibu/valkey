@@ -4358,6 +4358,7 @@ void bzvpopmaxCommand(client *c);
 void bzvmpopCommand(client *c);
 void zvrandmemberCommand(client *c);
 void zvscanCommand(client *c);
+void zvqueryCommand(client *c);
 void zvunionCommand(client *c);
 void zvunionstoreCommand(client *c);
 void zvinterCommand(client *c);

@@ -344,8 +344,7 @@ static unsigned long zvRangeResultCount(unsigned long lo, unsigned long hi, int 
 
 /* Emit [lo,hi) with direction/limit. All rank normalization and bound
  * resolution must be done by the caller. */
-static void zvrangeReply(client *c, zvset *zs, unsigned long lo, unsigned long hi, int reverse, long offset,
-                         long count, int withscores) {
+static void zvrangeReply(client *c, zvset *zs, unsigned long lo, unsigned long hi, int reverse, long offset, long count, int withscores) {
     unsigned long n = zvRangeResultCount(lo, hi, reverse, offset, count);
     addReplyArrayLen(c, withscores ? n * 2 : n);
     if (n == 0) return;
@@ -399,10 +398,8 @@ static int zvBuildScoreInterval(zvScoreBound *minb, zvScoreBound *maxb, sds *low
 
 /* Forward declarations for the shared range cores. */
 static void zvrangeRankCore(client *c, robj *zobj, long start, long stop, int reverse, int withscores);
-static int zvrangeScoreCore(client *c, robj *zobj, const char *minraw, size_t minlen, const char *maxraw,
-                            size_t maxlen, int reverse, int withscores, int has_limit, long offset, long count);
-static int zvrangeLexCore(client *c, robj *zobj, const char *minraw, size_t minlen, const char *maxraw,
-                          size_t maxlen, int reverse, int withscores, int has_limit, long offset, long count);
+static int zvrangeScoreCore(client *c, robj *zobj, const char *minraw, size_t minlen, const char *maxraw, size_t maxlen, int reverse, int withscores, int has_limit, long offset, long count);
+static int zvrangeLexCore(client *c, robj *zobj, const char *minraw, size_t minlen, const char *maxraw, size_t maxlen, int reverse, int withscores, int has_limit, long offset, long count);
 
 /* Parsed trailing range options shared by ZVRANGE/ZVRANGESTORE. */
 typedef struct zvRangeOpts {
@@ -578,10 +575,9 @@ static void zvrangeRankCore(client *c, robj *zobj, long start, long stop, int re
 
 /* BYSCORE core shared by ZVRANGE/ZVRANGEBYSCORE/ZVREVRANGEBYSCORE.
  * Returns C_OK, or C_ERR when bounds are invalid for the key. */
-static int zvrangeScoreCore(client *c, robj *zobj, const char *minraw, size_t minlen, const char *maxraw,
-                            size_t maxlen, int reverse, int withscores, int has_limit, long offset, long count) {
+static int zvrangeScoreCore(client *c, robj *zobj, const char *minraw, size_t minlen, const char *maxraw, size_t maxlen, int reverse, int withscores, int has_limit, long offset, long count) {
     zvset *zs = objectGetVal(zobj);
-    zvScoreBound minb, maxb;
+    zvScoreBound minb = {0}, maxb = {0};
     if (zvParseScoreBound(minraw, minlen, zs->dimensions, &minb) != C_OK ||
         zvParseScoreBound(maxraw, maxlen, zs->dimensions, &maxb) != C_OK) {
         zvFreeScoreBound(&minb);
@@ -743,14 +739,13 @@ static void zvReplyBylexUniformError(client *c) {
 /* BYLEX core shared by ZVRANGE/ZVRANGEBYLEX/ZVREVRANGEBYLEX/ZVLEXCOUNT.
  * Withscores is always 0 for BYLEX (members only). Returns C_OK, or
  * C_ERR with a reply already sent. */
-static int zvrangeLexCore(client *c, robj *zobj, const char *minraw, size_t minlen, const char *maxraw,
-                          size_t maxlen, int reverse, int withscores, int has_limit, long offset, long count) {
+static int zvrangeLexCore(client *c, robj *zobj, const char *minraw, size_t minlen, const char *maxraw, size_t maxlen, int reverse, int withscores, int has_limit, long offset, long count) {
     zvset *zs = objectGetVal(zobj);
     if (!zvsetUniformVector(zs)) {
         zvReplyBylexUniformError(c);
         return C_ERR;
     }
-    zvLexBound minb, maxb;
+    zvLexBound minb = {0}, maxb = {0};
     if (zvParseLexBound(minraw, minlen, &minb) != C_OK || zvParseLexBound(maxraw, maxlen, &maxb) != C_OK) {
         zvFreeLexBound(&minb);
         zvFreeLexBound(&maxb);
@@ -852,7 +847,7 @@ void zvlexcountCommand(client *c) {
         zvReplyBylexUniformError(c);
         return;
     }
-    zvLexBound minb, maxb;
+    zvLexBound minb = {0}, maxb = {0};
     if (zvParseLexBound(minraw, sdslen(minraw), &minb) != C_OK ||
         zvParseLexBound(maxraw, sdslen(maxraw), &maxb) != C_OK) {
         zvFreeLexBound(&minb);
@@ -960,7 +955,7 @@ void zvrangestoreCommand(client *c) {
             hi = (unsigned long)e + 1;
         }
     } else if (o.mode == 1) {
-        zvScoreBound minb, maxb;
+        zvScoreBound minb = {0}, maxb = {0};
         if (zvParseScoreBound(bound_min_raw, bound_min_len, src->dimensions, &minb) != C_OK ||
             zvParseScoreBound(bound_max_raw, bound_max_len, src->dimensions, &maxb) != C_OK) {
             zvFreeScoreBound(&minb);
@@ -981,7 +976,7 @@ void zvrangestoreCommand(client *c) {
             zvReplyBylexUniformError(c);
             return;
         }
-        zvLexBound minb, maxb;
+        zvLexBound minb = {0}, maxb = {0};
         if (zvParseLexBound(bound_min_raw, bound_min_len, &minb) != C_OK ||
             zvParseLexBound(bound_max_raw, bound_max_len, &maxb) != C_OK) {
             zvFreeLexBound(&minb);
@@ -1075,7 +1070,7 @@ void zvremrangebyrankCommand(client *c) {
         if (stop >= len) stop = len - 1;
         hashtablePauseAutoShrink(zs->ht);
         deleted = fbtreeDeleteRangeByRank(zs->tree, (unsigned long)start, (unsigned long)stop,
-                                         zvRangeDeleteCallback, zs);
+                                          zvRangeDeleteCallback, zs);
         zvremrangeFinish(c, key, zs, deleted, "zvremrangebyrank");
         return;
     }
@@ -1099,7 +1094,7 @@ void zvremrangebyscoreCommand(client *c) {
     }
     if ((zobj = lookupKeyWriteOrReply(c, key, shared.czero)) == NULL || checkType(c, zobj, OBJ_ZVSET)) return;
     zvset *zs = objectGetVal(zobj);
-    zvScoreBound minb, maxb;
+    zvScoreBound minb = {0}, maxb = {0};
     if (zvParseScoreBound(minraw, sdslen(minraw), zs->dimensions, &minb) != C_OK ||
         zvParseScoreBound(maxraw, sdslen(maxraw), zs->dimensions, &maxb) != C_OK) {
         zvFreeScoreBound(&minb);
@@ -1150,7 +1145,7 @@ void zvremrangebylexCommand(client *c) {
         zvReplyBylexUniformError(c);
         return;
     }
-    zvLexBound minb, maxb;
+    zvLexBound minb = {0}, maxb = {0};
     if (zvParseLexBound(minraw, sdslen(minraw), &minb) != C_OK ||
         zvParseLexBound(maxraw, sdslen(maxraw), &maxb) != C_OK) {
         zvFreeLexBound(&minb);
@@ -1184,8 +1179,7 @@ void zvremrangebylexCommand(client *c) {
 #define ZVPOP_MAX 1
 
 void zvmpopGenericCommand(client *c, int numkeys_idx, int is_block);
-void blockingGenericZvpopCommand(client *c, robj **keys, int numkeys, int where, int timeout_idx, long count,
-                                 int use_nested_array, int reply_nil_when_empty);
+void blockingGenericZvpopCommand(client *c, robj **keys, int numkeys, int where, int timeout_idx, long count, int use_nested_array, int reply_nil_when_empty);
 
 /* Temporary rank->rank map for distinct random sampling (sparse
  * Fisher-Yates). Entries are heap zvRankMapEntry structs freed by the
@@ -1435,8 +1429,7 @@ void zvmpopGenericCommand(client *c, int numkeys_idx, int is_block) {
 }
 
 /* BZVPOPMIN, BZVPOPMAX, BZVMPOP actual implementation. */
-void blockingGenericZvpopCommand(client *c, robj **keys, int numkeys, int where, int timeout_idx, long count,
-                                 int use_nested_array, int reply_nil_when_empty) {
+void blockingGenericZvpopCommand(client *c, robj **keys, int numkeys, int where, int timeout_idx, long count, int use_nested_array, int reply_nil_when_empty) {
     robj *o;
     robj *key;
     mstime_t timeout;
@@ -1602,6 +1595,147 @@ void zvscanCommand(client *c) {
     if (parseScanCursorOrReply(c, objectGetVal(c->argv[2]), &cursor) == C_ERR) return;
     if ((o = lookupKeyReadOrReply(c, c->argv[1], shared.emptyscan)) == NULL || checkType(c, o, OBJ_ZVSET)) return;
     scanGenericCommand(c, o, cursor);
+}
+
+/* Experimental multi-dimensional filter scan (full-scan reference).
+ * No secondary index: every item is visited in vector order. */
+typedef struct zvQueryFilter {
+    long dimension;
+    int min_ex, max_ex;
+    int min_unbounded, max_unbounded;
+    double min, max;
+} zvQueryFilter;
+
+/* Parse one scalar bound: "-", "+", "(1.5" or "1.5". NaN rejected. */
+static int zvQueryParseBound(const char *str, size_t len, int is_min, double *val, int *exclusive, int *unbounded) {
+    *exclusive = 0;
+    *unbounded = 0;
+    if (len == 1 && ((is_min && str[0] == '-') || (!is_min && str[0] == '+'))) {
+        *unbounded = 1;
+        return C_OK;
+    }
+    if (len > 1 && str[0] == '(') {
+        *exclusive = 1;
+        str++;
+        len--;
+    }
+    double v;
+    if (!string2d(str, len, &v)) return C_ERR;
+    *val = v;
+    return C_OK;
+}
+
+static int zvQueryMatches(const zvQueryFilter *filters, int nfilters, const_sds item) {
+    for (int i = 0; i < nfilters; i++) {
+        const zvQueryFilter *f = &filters[i];
+        double value = zvItemScoreAt(item, (uint8_t)f->dimension);
+        if (!f->min_unbounded && (value < f->min || (value == f->min && f->min_ex))) return 0;
+        if (!f->max_unbounded && (value > f->max || (value == f->max && f->max_ex))) return 0;
+    }
+    return 1;
+}
+
+void zvqueryCommand(client *c) {
+    robj *key = c->argv[1];
+    robj *zobj;
+    zvQueryFilter filters[ZVSET_MAX_DIMENSIONS];
+    int nfilters = 0;
+    long offset = 0, count = -1;
+    int withscores = 0;
+
+    if (c->argc < 2) {
+        addReplyErrorObject(c, shared.syntaxerr);
+        return;
+    }
+    int idx = 2;
+    while (idx < c->argc) {
+        char *opt = objectGetVal(c->argv[idx]);
+        if (!strcasecmp(opt, "filter")) {
+            if (nfilters >= ZVSET_MAX_DIMENSIONS || idx + 4 > c->argc) {
+                addReplyErrorObject(c, shared.syntaxerr);
+                return;
+            }
+            long dim;
+            if (getLongFromObjectOrReply(c, c->argv[idx + 1], &dim, NULL) != C_OK) return;
+            if (dim < 0) {
+                addReplyError(c, "filter dimension must be non-negative");
+                return;
+            }
+            zvQueryFilter *f = &filters[nfilters];
+            f->dimension = dim;
+            sds mins = objectGetVal(c->argv[idx + 2]);
+            sds maxs = objectGetVal(c->argv[idx + 3]);
+            if (zvQueryParseBound(mins, sdslen(mins), 1, &f->min, &f->min_ex, &f->min_unbounded) != C_OK ||
+                zvQueryParseBound(maxs, sdslen(maxs), 0, &f->max, &f->max_ex, &f->max_unbounded) != C_OK) {
+                addReplyError(c, "invalid filter bound");
+                return;
+            }
+            nfilters++;
+            idx += 4;
+        } else if (!strcasecmp(opt, "limit")) {
+            if (idx + 2 >= c->argc) {
+                addReplyErrorObject(c, shared.syntaxerr);
+                return;
+            }
+            if (getLongFromObjectOrReply(c, c->argv[idx + 1], &offset, NULL) != C_OK) return;
+            if (getLongFromObjectOrReply(c, c->argv[idx + 2], &count, NULL) != C_OK) return;
+            if (offset < 0) {
+                addReplyError(c, "LIMIT offset must be non-negative");
+                return;
+            }
+            idx += 3;
+        } else if (!strcasecmp(opt, "withscores")) {
+            withscores = 1;
+            idx++;
+        } else {
+            addReplyErrorObject(c, shared.syntaxerr);
+            return;
+        }
+    }
+
+    if ((zobj = lookupKeyReadOrReply(c, key, shared.emptyarray)) == NULL || checkType(c, zobj, OBJ_ZVSET))
+        return;
+    zvset *zs = objectGetVal(zobj);
+
+    /* Validate dimensions and trivially-reversed filters up front. */
+    for (int i = 0; i < nfilters; i++) {
+        if (filters[i].dimension >= zs->dimensions) {
+            addReplyError(c, "filter dimension out of range");
+            return;
+        }
+        if (!filters[i].min_unbounded && !filters[i].max_unbounded &&
+            (filters[i].min > filters[i].max ||
+             (filters[i].min == filters[i].max && (filters[i].min_ex || filters[i].max_ex)))) {
+            addReplyArrayLen(c, 0);
+            return;
+        }
+    }
+
+    /* Full scan in vector order, streamed with a deferred length so no
+     * transient copy of the result set is needed. */
+    void *arraylen_ptr = addReplyDeferredLen(c);
+    long emitted = 0;
+    long skipped = 0;
+    fbtreeIterator it;
+    fbtreeInitIterator(&it, zs->tree);
+    const_sds item;
+    while ((item = fbtreeNext(&it)) != NULL) {
+        if (!zvQueryMatches(filters, nfilters, item)) continue;
+        if (skipped < offset) {
+            skipped++;
+            continue;
+        }
+        if (count >= 0 && emitted >= count) break;
+        size_t member_len;
+        const char *member = zvItemMember(item, &member_len);
+        addReplyBulkCBuffer(c, member, member_len);
+        if (withscores) {
+            sds formatted = zvItemFormatScore(item);
+            addReplyBulkSds(c, formatted);
+        }
+        emitted++;
+    }
+    setDeferredArrayLen(c, arraylen_ptr, withscores ? emitted * 2 : emitted);
 }
 
 #define ZV_OP_UNION 0
@@ -1972,7 +2106,7 @@ void zvcountCommand(client *c) {
     }
     if ((zobj = lookupKeyReadOrReply(c, key, shared.czero)) == NULL || checkType(c, zobj, OBJ_ZVSET)) return;
     zvset *zs = objectGetVal(zobj);
-    zvScoreBound minb, maxb;
+    zvScoreBound minb = {0}, maxb = {0};
     if (zvParseScoreBound(minraw, sdslen(minraw), zs->dimensions, &minb) != C_OK ||
         zvParseScoreBound(maxraw, sdslen(maxraw), zs->dimensions, &maxb) != C_OK) {
         zvFreeScoreBound(&minb);

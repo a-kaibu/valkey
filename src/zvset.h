@@ -123,8 +123,7 @@ sds zvLexSeekKey(zvset *zs, const char *member, size_t member_len);
 /* Range iteration over [lo,hi): reverse selects direction, offset/count
  * apply LIMIT (count < 0 means all). emit is called per item. */
 typedef void (*zvRangeEmit)(void *ctx, const_sds item);
-void zvIterateRange(zvset *zs, unsigned long lo, unsigned long hi, int reverse, long offset, long count,
-                    zvRangeEmit emit, void *ctx);
+void zvIterateRange(zvset *zs, unsigned long lo, unsigned long hi, int reverse, long offset, long count, zvRangeEmit emit, void *ctx);
 
 /* double <-> sortable conversion (same rule as ordered_index.c). */
 uint64_t zvScoreToSortable(double score);

@@ -11482,6 +11482,48 @@ struct COMMAND_ARG ZVPOPMIN_Args[] = {
 {MAKE_ARG("count",ARG_TYPE_INTEGER,-1,NULL,NULL,NULL,CMD_ARG_OPTIONAL,0,NULL)},
 };
 
+/********** ZVQUERY ********************/
+
+#ifndef SKIP_CMD_HISTORY_TABLE
+/* ZVQUERY history */
+#define ZVQUERY_History NULL
+#endif
+
+#ifndef SKIP_CMD_TIPS_TABLE
+/* ZVQUERY tips */
+#define ZVQUERY_Tips NULL
+#endif
+
+#ifndef SKIP_CMD_KEY_SPECS_TABLE
+/* ZVQUERY key specs */
+keySpec ZVQUERY_Keyspecs[1] = {
+{NULL,CMD_KEY_RO|CMD_KEY_ACCESS,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}
+};
+#endif
+
+/* ZVQUERY filter argument table */
+struct COMMAND_ARG ZVQUERY_filter_Subargs[] = {
+{MAKE_ARG("filter-token",ARG_TYPE_PURE_TOKEN,-1,"FILTER",NULL,NULL,CMD_ARG_NONE,0,NULL)},
+{MAKE_ARG("dimension",ARG_TYPE_INTEGER,-1,NULL,NULL,NULL,CMD_ARG_NONE,0,NULL)},
+{MAKE_ARG("min",ARG_TYPE_STRING,-1,NULL,NULL,NULL,CMD_ARG_NONE,0,NULL)},
+{MAKE_ARG("max",ARG_TYPE_STRING,-1,NULL,NULL,NULL,CMD_ARG_NONE,0,NULL)},
+};
+
+/* ZVQUERY limit argument table */
+struct COMMAND_ARG ZVQUERY_limit_Subargs[] = {
+{MAKE_ARG("limit-token",ARG_TYPE_PURE_TOKEN,-1,"LIMIT",NULL,NULL,CMD_ARG_NONE,0,NULL)},
+{MAKE_ARG("offset",ARG_TYPE_INTEGER,-1,NULL,NULL,NULL,CMD_ARG_NONE,0,NULL)},
+{MAKE_ARG("count",ARG_TYPE_INTEGER,-1,NULL,NULL,NULL,CMD_ARG_NONE,0,NULL)},
+};
+
+/* ZVQUERY argument table */
+struct COMMAND_ARG ZVQUERY_Args[] = {
+{MAKE_ARG("key",ARG_TYPE_KEY,0,NULL,NULL,NULL,CMD_ARG_NONE,0,NULL)},
+{MAKE_ARG("filter",ARG_TYPE_BLOCK,-1,NULL,NULL,NULL,CMD_ARG_OPTIONAL|CMD_ARG_MULTIPLE,4,NULL),.subargs=ZVQUERY_filter_Subargs},
+{MAKE_ARG("limit",ARG_TYPE_BLOCK,-1,NULL,NULL,NULL,CMD_ARG_OPTIONAL,3,NULL),.subargs=ZVQUERY_limit_Subargs},
+{MAKE_ARG("withscores",ARG_TYPE_PURE_TOKEN,-1,"WITHSCORES",NULL,NULL,CMD_ARG_OPTIONAL,0,NULL)},
+};
+
 /********** ZVRANDMEMBER ********************/
 
 #ifndef SKIP_CMD_HISTORY_TABLE
@@ -14023,6 +14065,7 @@ struct COMMAND_STRUCT serverCommandTable[] = {
 {MAKE_CMD("zvmscore","Returns the vector scores of multiple members in a ZVSET.","O(1) for each member.","9.2.0",CMD_DOC_NONE,NULL,NULL,"sorted_set",COMMAND_GROUP_SORTED_SET,ZVMSCORE_History,0,ZVMSCORE_Tips,0,zvmscoreCommand,-3,CMD_READONLY|CMD_FAST,ACL_CATEGORY_FAST|ACL_CATEGORY_READ|ACL_CATEGORY_SORTEDSET,NULL,ZVMSCORE_Keyspecs,1,NULL,2),.args=ZVMSCORE_Args},
 {MAKE_CMD("zvpopmax","Removes and returns the highest-vector members in a ZVSET.","O(log(N)*M)","9.2.0",CMD_DOC_NONE,NULL,NULL,"sorted_set",COMMAND_GROUP_SORTED_SET,ZVPOPMAX_History,0,ZVPOPMAX_Tips,0,zvpopmaxCommand,-2,CMD_WRITE|CMD_FAST,ACL_CATEGORY_FAST|ACL_CATEGORY_SORTEDSET|ACL_CATEGORY_WRITE,NULL,ZVPOPMAX_Keyspecs,1,NULL,2),.args=ZVPOPMAX_Args},
 {MAKE_CMD("zvpopmin","Removes and returns the lowest-vector members in a ZVSET.","O(log(N)*M)","9.2.0",CMD_DOC_NONE,NULL,NULL,"sorted_set",COMMAND_GROUP_SORTED_SET,ZVPOPMIN_History,0,ZVPOPMIN_Tips,0,zvpopminCommand,-2,CMD_WRITE|CMD_FAST,ACL_CATEGORY_FAST|ACL_CATEGORY_SORTEDSET|ACL_CATEGORY_WRITE,NULL,ZVPOPMIN_Keyspecs,1,NULL,2),.args=ZVPOPMIN_Args},
+{MAKE_CMD("zvquery","Experimental multi-dimensional conditional scan over a ZVSET (full-scan reference).","O(N*F) where N is the cardinality and F the filter count.","9.2.0",CMD_DOC_NONE,NULL,NULL,"sorted_set",COMMAND_GROUP_SORTED_SET,ZVQUERY_History,0,ZVQUERY_Tips,0,zvqueryCommand,-2,CMD_READONLY,ACL_CATEGORY_READ|ACL_CATEGORY_SORTEDSET|ACL_CATEGORY_SLOW,NULL,ZVQUERY_Keyspecs,1,NULL,4),.args=ZVQUERY_Args},
 {MAKE_CMD("zvrandmember","Returns random members in a ZVSET.","O(1) single, O(N) distinct full scan worst case.","9.2.0",CMD_DOC_NONE,NULL,NULL,"sorted_set",COMMAND_GROUP_SORTED_SET,ZVRANDMEMBER_History,0,ZVRANDMEMBER_Tips,0,zvrandmemberCommand,-2,CMD_READONLY,ACL_CATEGORY_READ|ACL_CATEGORY_SORTEDSET|ACL_CATEGORY_SLOW,NULL,ZVRANDMEMBER_Keyspecs,1,NULL,3),.args=ZVRANDMEMBER_Args},
 {MAKE_CMD("zvrange","Returns members in a ZVSET range by index, vector score, or member name.","O(log(N)+M)","9.2.0",CMD_DOC_NONE,NULL,NULL,"sorted_set",COMMAND_GROUP_SORTED_SET,ZVRANGE_History,0,ZVRANGE_Tips,0,zvrangeCommand,-4,CMD_READONLY,ACL_CATEGORY_READ|ACL_CATEGORY_SORTEDSET|ACL_CATEGORY_SLOW,NULL,ZVRANGE_Keyspecs,1,NULL,7),.args=ZVRANGE_Args},
 {MAKE_CMD("zvrangebylex","Returns members in a ZVSET member-name range. Requires uniform vector scores.","O(log(N)+M)","9.2.0",CMD_DOC_NONE,NULL,NULL,"sorted_set",COMMAND_GROUP_SORTED_SET,ZVRANGEBYLEX_History,0,ZVRANGEBYLEX_Tips,0,zvrangebylexCommand,-4,CMD_READONLY,ACL_CATEGORY_READ|ACL_CATEGORY_SORTEDSET|ACL_CATEGORY_SLOW,NULL,ZVRANGEBYLEX_Keyspecs,1,NULL,4),.args=ZVRANGEBYLEX_Args},

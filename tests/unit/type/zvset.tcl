@@ -697,8 +697,7 @@ start_server {tags {"zvset-setops"}} {    proc zv_setup_setops {} {
     }
 }
 
-start_server {tags {"zvset-blocking"}} {
-    test "BZVPOPMIN wake-up on ZVADD" {
+start_server {tags {"zvset-blocking"}} {    test "BZVPOPMIN wake-up on ZVADD" {
         r del bk
         set rd [valkey_deferring_client]
         $rd bzvpopmin bk 5
@@ -753,5 +752,50 @@ start_server {tags {"zvset-blocking"}} {
         r zadd bk 1 m
         assert_error "*WRONGTYPE*" {$rd read}
         $rd close
+    }
+}
+
+start_server {tags {"zvset-query"}} {
+    proc zv_setup_players {} {
+        r del players
+        r zvadd players 1000#20#5 alice 1100#25#7 bob 1200#15#9 carol 1300#30#5 dave
+    }
+
+    test "ZVQUERY basic AND filters" {
+        zv_setup_players
+        assert_equal {alice bob carol} [r zvquery players filter 0 1000 1200 filter 1 0 30]
+        assert_equal {alice bob} [r zvquery players filter 0 1000 1100 filter 2 5 7]
+        # no filters = everything in vector order
+        assert_equal {alice bob carol dave} [r zvquery players]
+        # withscores
+        assert_equal {bob 1100#25#7} [r zvquery players filter 0 1100 1100 withscores]
+    }
+
+    test "ZVQUERY exclusive bounds and limits" {
+        zv_setup_players
+        assert_equal {carol} [r zvquery players filter 0 (1100 1200]
+        assert_equal {alice bob} [r zvquery players filter 0 1000 (1200]
+        assert_equal {carol dave} [r zvquery players filter 0 1000 + limit 2 10]
+        assert_equal {dave} [r zvquery players filter 0 1000 + limit 3 10]
+        assert_equal {} [r zvquery players filter 0 1000 + limit 0 0]
+        assert_equal {bob carol} [r zvquery players filter 0 1000 1200 limit 1 -1]
+    }
+
+    test "ZVQUERY edge cases" {
+        zv_setup_players
+        # reversed range is empty
+        assert_equal {} [r zvquery players filter 0 1200 1000]
+        assert_equal {} [r zvquery players filter 0 1100 (1100]
+        # dimension out of range
+        assert_error "*out of range*" {r zvquery players filter 3 0 10}
+        assert_error "*non-negative*" {r zvquery players filter -1 0 10}
+        # bad bound
+        assert_error "*invalid filter*" {r zvquery players filter 0 abc 10}
+        assert_error "*invalid filter*" {r zvquery players filter 0 1#2 10}
+        # missing key
+        assert_equal {} [r zvquery nokey filter 0 0 10]
+        # wrong type
+        r set s str
+        assert_error "*WRONGTYPE*" {r zvquery s filter 0 0 10}
     }
 }
