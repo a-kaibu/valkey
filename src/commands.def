@@ -9931,6 +9931,90 @@ struct COMMAND_ARG BZPOPMIN_Args[] = {
 {MAKE_ARG("timeout",ARG_TYPE_DOUBLE,-1,NULL,NULL,NULL,CMD_ARG_NONE,0,NULL)},
 };
 
+/********** BZVMPOP ********************/
+
+#ifndef SKIP_CMD_HISTORY_TABLE
+/* BZVMPOP history */
+#define BZVMPOP_History NULL
+#endif
+
+#ifndef SKIP_CMD_TIPS_TABLE
+/* BZVMPOP tips */
+#define BZVMPOP_Tips NULL
+#endif
+
+#ifndef SKIP_CMD_KEY_SPECS_TABLE
+/* BZVMPOP key specs */
+keySpec BZVMPOP_Keyspecs[1] = {
+{NULL,CMD_KEY_RW|CMD_KEY_ACCESS|CMD_KEY_DELETE,KSPEC_BS_INDEX,.bs.index={2},KSPEC_FK_KEYNUM,.fk.keynum={0,1,1}}
+};
+#endif
+
+/* BZVMPOP where argument table */
+struct COMMAND_ARG BZVMPOP_where_Subargs[] = {
+{MAKE_ARG("min",ARG_TYPE_PURE_TOKEN,-1,"MIN",NULL,NULL,CMD_ARG_NONE,0,NULL)},
+{MAKE_ARG("max",ARG_TYPE_PURE_TOKEN,-1,"MAX",NULL,NULL,CMD_ARG_NONE,0,NULL)},
+};
+
+/* BZVMPOP argument table */
+struct COMMAND_ARG BZVMPOP_Args[] = {
+{MAKE_ARG("timeout",ARG_TYPE_DOUBLE,-1,NULL,NULL,NULL,CMD_ARG_NONE,0,NULL)},
+{MAKE_ARG("numkeys",ARG_TYPE_INTEGER,-1,NULL,NULL,NULL,CMD_ARG_NONE,0,NULL)},
+{MAKE_ARG("key",ARG_TYPE_KEY,0,NULL,NULL,NULL,CMD_ARG_MULTIPLE,0,NULL)},
+{MAKE_ARG("where",ARG_TYPE_ONEOF,-1,NULL,NULL,NULL,CMD_ARG_NONE,2,NULL),.subargs=BZVMPOP_where_Subargs},
+{MAKE_ARG("count",ARG_TYPE_INTEGER,-1,"COUNT",NULL,NULL,CMD_ARG_OPTIONAL,0,NULL)},
+};
+
+/********** BZVPOPMAX ********************/
+
+#ifndef SKIP_CMD_HISTORY_TABLE
+/* BZVPOPMAX history */
+#define BZVPOPMAX_History NULL
+#endif
+
+#ifndef SKIP_CMD_TIPS_TABLE
+/* BZVPOPMAX tips */
+#define BZVPOPMAX_Tips NULL
+#endif
+
+#ifndef SKIP_CMD_KEY_SPECS_TABLE
+/* BZVPOPMAX key specs */
+keySpec BZVPOPMAX_Keyspecs[1] = {
+{NULL,CMD_KEY_RW|CMD_KEY_DELETE,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={-2,1,0}}
+};
+#endif
+
+/* BZVPOPMAX argument table */
+struct COMMAND_ARG BZVPOPMAX_Args[] = {
+{MAKE_ARG("key",ARG_TYPE_KEY,0,NULL,NULL,NULL,CMD_ARG_MULTIPLE,0,NULL)},
+{MAKE_ARG("timeout",ARG_TYPE_DOUBLE,-1,NULL,NULL,NULL,CMD_ARG_NONE,0,NULL)},
+};
+
+/********** BZVPOPMIN ********************/
+
+#ifndef SKIP_CMD_HISTORY_TABLE
+/* BZVPOPMIN history */
+#define BZVPOPMIN_History NULL
+#endif
+
+#ifndef SKIP_CMD_TIPS_TABLE
+/* BZVPOPMIN tips */
+#define BZVPOPMIN_Tips NULL
+#endif
+
+#ifndef SKIP_CMD_KEY_SPECS_TABLE
+/* BZVPOPMIN key specs */
+keySpec BZVPOPMIN_Keyspecs[1] = {
+{NULL,CMD_KEY_RW|CMD_KEY_DELETE,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={-2,1,0}}
+};
+#endif
+
+/* BZVPOPMIN argument table */
+struct COMMAND_ARG BZVPOPMIN_Args[] = {
+{MAKE_ARG("key",ARG_TYPE_KEY,0,NULL,NULL,NULL,CMD_ARG_MULTIPLE,0,NULL)},
+{MAKE_ARG("timeout",ARG_TYPE_DOUBLE,-1,NULL,NULL,NULL,CMD_ARG_NONE,0,NULL)},
+};
+
 /********** ZADD ********************/
 
 #ifndef SKIP_CMD_HISTORY_TABLE
@@ -13890,6 +13974,9 @@ struct COMMAND_STRUCT serverCommandTable[] = {
 {MAKE_CMD("bzmpop","Removes and returns a member by score from one or more sorted sets. Blocks until a member is available otherwise. Deletes the sorted set if the last element was popped.","O(K) + O(M*log(N)) where K is the number of provided keys, N being the number of elements in the sorted set, and M being the number of elements popped.","7.0.0",CMD_DOC_NONE,NULL,NULL,"sorted_set",COMMAND_GROUP_SORTED_SET,BZMPOP_History,0,BZMPOP_Tips,0,bzmpopCommand,-5,CMD_WRITE|CMD_BLOCKING,ACL_CATEGORY_BLOCKING|ACL_CATEGORY_SLOW|ACL_CATEGORY_SORTEDSET|ACL_CATEGORY_WRITE,NULL,BZMPOP_Keyspecs,1,bzmpopGetKeys,5),.args=BZMPOP_Args},
 {MAKE_CMD("bzpopmax","Removes and returns the member with the highest score from one or more sorted sets. Blocks until a member is available otherwise. Deletes the sorted set if the last element was popped.","O(log(N)) with N being the number of elements in the sorted set.","5.0.0",CMD_DOC_NONE,NULL,NULL,"sorted_set",COMMAND_GROUP_SORTED_SET,BZPOPMAX_History,1,BZPOPMAX_Tips,0,bzpopmaxCommand,-3,CMD_WRITE|CMD_FAST|CMD_BLOCKING,ACL_CATEGORY_BLOCKING|ACL_CATEGORY_FAST|ACL_CATEGORY_SORTEDSET|ACL_CATEGORY_WRITE,NULL,BZPOPMAX_Keyspecs,1,NULL,2),.args=BZPOPMAX_Args},
 {MAKE_CMD("bzpopmin","Removes and returns the member with the lowest score from one or more sorted sets. Blocks until a member is available otherwise. Deletes the sorted set if the last element was popped.","O(log(N)) with N being the number of elements in the sorted set.","5.0.0",CMD_DOC_NONE,NULL,NULL,"sorted_set",COMMAND_GROUP_SORTED_SET,BZPOPMIN_History,1,BZPOPMIN_Tips,0,bzpopminCommand,-3,CMD_WRITE|CMD_FAST|CMD_BLOCKING,ACL_CATEGORY_BLOCKING|ACL_CATEGORY_FAST|ACL_CATEGORY_SORTEDSET|ACL_CATEGORY_WRITE,NULL,BZPOPMIN_Keyspecs,1,NULL,2),.args=BZPOPMIN_Args},
+{MAKE_CMD("bzvmpop","Pops the first non-empty ZVSET among the keys, blocking if all empty.","O(log(N))","9.2.0",CMD_DOC_NONE,NULL,NULL,"sorted_set",COMMAND_GROUP_SORTED_SET,BZVMPOP_History,0,BZVMPOP_Tips,0,bzvmpopCommand,-5,CMD_WRITE|CMD_BLOCKING|CMD_FAST,ACL_CATEGORY_BLOCKING|ACL_CATEGORY_FAST|ACL_CATEGORY_SORTEDSET|ACL_CATEGORY_WRITE,NULL,BZVMPOP_Keyspecs,1,NULL,5),.args=BZVMPOP_Args},
+{MAKE_CMD("bzvpopmax","Removes and returns the highest-vector member, blocking if empty.","O(log(N))","9.2.0",CMD_DOC_NONE,NULL,NULL,"sorted_set",COMMAND_GROUP_SORTED_SET,BZVPOPMAX_History,0,BZVPOPMAX_Tips,0,bzvpopmaxCommand,-3,CMD_WRITE|CMD_BLOCKING|CMD_FAST,ACL_CATEGORY_BLOCKING|ACL_CATEGORY_FAST|ACL_CATEGORY_SORTEDSET|ACL_CATEGORY_WRITE,NULL,BZVPOPMAX_Keyspecs,1,NULL,2),.args=BZVPOPMAX_Args},
+{MAKE_CMD("bzvpopmin","Removes and returns the lowest-vector member, blocking if empty.","O(log(N))","9.2.0",CMD_DOC_NONE,NULL,NULL,"sorted_set",COMMAND_GROUP_SORTED_SET,BZVPOPMIN_History,0,BZVPOPMIN_Tips,0,bzvpopminCommand,-3,CMD_WRITE|CMD_BLOCKING|CMD_FAST,ACL_CATEGORY_BLOCKING|ACL_CATEGORY_FAST|ACL_CATEGORY_SORTEDSET|ACL_CATEGORY_WRITE,NULL,BZVPOPMIN_Keyspecs,1,NULL,2),.args=BZVPOPMIN_Args},
 {MAKE_CMD("zadd","Adds one or more members to a sorted set, or updates their scores. Creates the key if it doesn't exist.","O(log(N)) for each item added, where N is the number of elements in the sorted set.","1.2.0",CMD_DOC_NONE,NULL,NULL,"sorted_set",COMMAND_GROUP_SORTED_SET,ZADD_History,3,ZADD_Tips,0,zaddCommand,-4,CMD_WRITE|CMD_DENYOOM|CMD_FAST,ACL_CATEGORY_FAST|ACL_CATEGORY_SORTEDSET|ACL_CATEGORY_WRITE,NULL,ZADD_Keyspecs,1,NULL,6),.args=ZADD_Args},
 {MAKE_CMD("zcard","Returns the number of members in a sorted set.","O(1)","1.2.0",CMD_DOC_NONE,NULL,NULL,"sorted_set",COMMAND_GROUP_SORTED_SET,ZCARD_History,0,ZCARD_Tips,0,zcardCommand,2,CMD_READONLY|CMD_FAST,ACL_CATEGORY_FAST|ACL_CATEGORY_READ|ACL_CATEGORY_SORTEDSET,NULL,ZCARD_Keyspecs,1,NULL,1),.args=ZCARD_Args},
 {MAKE_CMD("zcount","Returns the count of members in a sorted set that have scores within a range.","O(log(N)) with N being the number of elements in the sorted set.","2.0.0",CMD_DOC_NONE,NULL,NULL,"sorted_set",COMMAND_GROUP_SORTED_SET,ZCOUNT_History,0,ZCOUNT_Tips,0,zcountCommand,4,CMD_READONLY|CMD_FAST,ACL_CATEGORY_FAST|ACL_CATEGORY_READ|ACL_CATEGORY_SORTEDSET,NULL,ZCOUNT_Keyspecs,1,NULL,3),.args=ZCOUNT_Args},

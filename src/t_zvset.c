@@ -1183,6 +1183,10 @@ void zvremrangebylexCommand(client *c) {
 #define ZVPOP_MIN 0
 #define ZVPOP_MAX 1
 
+void zvmpopGenericCommand(client *c, int numkeys_idx, int is_block);
+void blockingGenericZvpopCommand(client *c, robj **keys, int numkeys, int where, int timeout_idx, long count,
+                                 int use_nested_array, int reply_nil_when_empty);
+
 /* Temporary rank->rank map for distinct random sampling (sparse
  * Fisher-Yates). Entries are heap zvRankMapEntry structs freed by the
  * entry destructor on release. */
@@ -1371,40 +1375,116 @@ void zvpopmaxCommand(client *c) {
 }
 
 void zvmpopCommand(client *c) {
-    long j, numkeys = 0;
-    int where = -1;
+    zvmpopGenericCommand(c, 1, 0);
+}
 
-    if (getRangeLongFromObjectOrReply(c, c->argv[1], 1, LONG_MAX, &numkeys, "numkeys should be greater than 0") !=
-        C_OK)
+void bzvmpopCommand(client *c) {
+    zvmpopGenericCommand(c, 2, 1);
+}
+
+void zvmpopGenericCommand(client *c, int numkeys_idx, int is_block) {
+    long j;
+    long numkeys = 0;
+    int where = ZVPOP_MIN;
+    long count = -1;
+
+    if (getRangeLongFromObjectOrReply(c, c->argv[numkeys_idx], 1, LONG_MAX, &numkeys,
+                                      "numkeys should be greater than 0") != C_OK)
         return;
 
-    if (numkeys > c->argc - 3) {
+    if (numkeys > c->argc - (numkeys_idx + 2)) {
         addReplyError(c, "numkeys should be less than the number of arguments");
         return;
     }
 
-    long where_idx = 1 + numkeys + 1;
-    if (where_idx >= c->argc || (strcasecmp(objectGetVal(c->argv[where_idx]), "min") &&
-                                 strcasecmp(objectGetVal(c->argv[where_idx]), "max"))) {
+    long where_idx = numkeys_idx + numkeys + 1;
+    if (where_idx >= c->argc) {
         addReplyErrorObject(c, shared.syntaxerr);
         return;
     }
-    where = !strcasecmp(objectGetVal(c->argv[where_idx]), "max") ? ZVPOP_MAX : ZVPOP_MIN;
+    if (!strcasecmp(objectGetVal(c->argv[where_idx]), "MIN")) {
+        where = ZVPOP_MIN;
+    } else if (!strcasecmp(objectGetVal(c->argv[where_idx]), "MAX")) {
+        where = ZVPOP_MAX;
+    } else {
+        addReplyErrorObject(c, shared.syntaxerr);
+        return;
+    }
 
-    long count = 1;
     for (j = where_idx + 1; j < c->argc; j++) {
         char *opt = objectGetVal(c->argv[j]);
         int moreargs = (c->argc - 1) - j;
-        if (!strcasecmp(opt, "count") && moreargs) {
+        if (count == -1 && !strcasecmp(opt, "COUNT") && moreargs) {
             j++;
-            if (getPositiveLongFromObjectOrReply(c, c->argv[j], &count, NULL) != C_OK) return;
+            if (getRangeLongFromObjectOrReply(c, c->argv[j], 1, LONG_MAX, &count, "count should be greater than 0") !=
+                C_OK)
+                return;
         } else {
             addReplyErrorObject(c, shared.syntaxerr);
             return;
         }
     }
 
-    genericZvpopCommand(c, c->argv + 2, (int)numkeys, where, 1, count, 1, 1, NULL);
+    if (count == -1) count = 1;
+
+    if (is_block) {
+        blockingGenericZvpopCommand(c, c->argv + numkeys_idx + 1, (int)numkeys, where, 1, count, 1, 1);
+    } else {
+        genericZvpopCommand(c, c->argv + numkeys_idx + 1, (int)numkeys, where, 1, count, 1, 1, NULL);
+    }
+}
+
+/* BZVPOPMIN, BZVPOPMAX, BZVMPOP actual implementation. */
+void blockingGenericZvpopCommand(client *c, robj **keys, int numkeys, int where, int timeout_idx, long count,
+                                 int use_nested_array, int reply_nil_when_empty) {
+    robj *o;
+    robj *key;
+    mstime_t timeout;
+    int j;
+
+    if (getTimeoutFromObjectOrReply(c, c->argv[timeout_idx], &timeout, UNIT_SECONDS) != C_OK) return;
+
+    for (j = 0; j < numkeys; j++) {
+        key = keys[j];
+        o = lookupKeyWrite(c->db, key);
+        if (o == NULL) continue;
+
+        if (checkType(c, o, OBJ_ZVSET)) return;
+
+        long llen = (long)zvsetObjectLength(o);
+        if (llen == 0) continue;
+
+        genericZvpopCommand(c, &key, 1, where, 1, count, use_nested_array, reply_nil_when_empty, NULL);
+
+        if (count == -1) {
+            robj *popcmd = createStringObject(where == ZVPOP_MAX ? "ZVPOPMAX" : "ZVPOPMIN", 8);
+            rewriteClientCommandVector(c, 2, popcmd, key);
+            decrRefCount(popcmd);
+        } else {
+            robj *popcmd = createStringObject(where == ZVPOP_MAX ? "ZVPOPMAX" : "ZVPOPMIN", 8);
+            robj *count_obj = createStringObjectFromLongLong((count > llen) ? llen : count);
+            rewriteClientCommandVector(c, 3, popcmd, key, count_obj);
+            decrRefCount(popcmd);
+            decrRefCount(count_obj);
+        }
+        return;
+    }
+
+    /* Not allowed to block: treat as timeout (even with timeout 0). */
+    if (c->flag.deny_blocking) {
+        addReplyNullArray(c);
+        return;
+    }
+
+    blockForKeys(c, BLOCKED_ZSET, keys, numkeys, timeout, 0);
+}
+
+void bzvpopminCommand(client *c) {
+    blockingGenericZvpopCommand(c, c->argv + 1, c->argc - 2, ZVPOP_MIN, c->argc - 1, -1, 0, 0);
+}
+
+void bzvpopmaxCommand(client *c) {
+    blockingGenericZvpopCommand(c, c->argv + 1, c->argc - 2, ZVPOP_MAX, c->argc - 1, -1, 0, 0);
 }
 
 void zvrandmemberCommand(client *c) {

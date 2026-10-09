@@ -524,6 +524,12 @@ static blocking_type getBlockedTypeByType(int type) {
     switch (type) {
     case OBJ_LIST: return BLOCKED_LIST;
     case OBJ_ZSET: return BLOCKED_ZSET;
+    case OBJ_ZVSET:
+        /* ZVSET shares the ZSET blocking type. Wake-up only fires on key
+         * creation (dbAdd), and both BZPOP* and BZVPOP* re-validate the
+         * key type when unblocked, so a cross-type wake-up safely ends
+         * in a WRONGTYPE error instead of a crash. */
+        return BLOCKED_ZSET;
     case OBJ_MODULE: return BLOCKED_MODULE;
     case OBJ_STREAM: return BLOCKED_STREAM;
     default: return BLOCKED_NONE;

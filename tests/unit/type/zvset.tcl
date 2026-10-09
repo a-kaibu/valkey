@@ -616,8 +616,7 @@ start_server {tags {"zvset needs:debug"} overrides {appendonly yes aof-use-rdb-p
     }
 }
 
-start_server {tags {"zvset-setops"}} {
-    proc zv_setup_setops {} {
+start_server {tags {"zvset-setops"}} {    proc zv_setup_setops {} {
         r del a b u v w
         r zvadd a 10#20 alice 20#0 bob 1#5 carol
         r zvadd b 3#7 alice 30#0 bob 4#9 dave
@@ -695,5 +694,64 @@ start_server {tags {"zvset-setops"}} {
         # wrong type
         r set s str
         assert_error "*WRONGTYPE*" {r zvunion 2 a s}
+    }
+}
+
+start_server {tags {"zvset-blocking"}} {
+    test "BZVPOPMIN wake-up on ZVADD" {
+        r del bk
+        set rd [valkey_deferring_client]
+        $rd bzvpopmin bk 5
+        wait_for_blocked_clients_count 1
+        r zvadd bk 1#1 a 2#2 b
+        assert_equal {bk a 1#1} [$rd read]
+        assert_equal {b} [r zvrange bk 0 -1]
+        $rd close
+    }
+
+    test "BZVPOPMAX timeout returns nil" {
+        r del bk
+        set rd [valkey_deferring_client]
+        $rd bzvpopmax bk 1
+        assert_equal {} [$rd read]
+        $rd close
+    }
+
+    test "BZVPOPMIN multi-key order" {
+        r del k1 k2
+        r zvadd k2 1#1 x
+        set rd [valkey_deferring_client]
+        $rd bzvpopmin k1 k2 5
+        assert_equal {k2 x 1#1} [$rd read]
+        $rd close
+    }
+
+    test "BZVMPOP wake-up and count" {
+        r del bk
+        set rd [valkey_deferring_client]
+        $rd bzvmpop 0 1 bk min count 2
+        wait_for_blocked_clients_count 1
+        r zvadd bk 1#1 a 2#2 b 3#3 c
+        assert_equal {bk {{a 1#1} {b 2#2}}} [$rd read]
+        assert_equal {c} [r zvrange bk 0 -1]
+        $rd close
+    }
+
+    test "BZVPOPMIN on wrong type errors" {
+        r set s str
+        set rd [valkey_deferring_client]
+        $rd bzvpopmin s 1
+        assert_error "*WRONGTYPE*" {$rd read}
+        $rd close
+    }
+
+    test "BZVPOPMIN woken by ZSET creation gets WRONGTYPE safely" {
+        r del bk
+        set rd [valkey_deferring_client]
+        $rd bzvpopmin bk 5
+        wait_for_blocked_clients_count 1
+        r zadd bk 1 m
+        assert_error "*WRONGTYPE*" {$rd read}
+        $rd close
     }
 }
