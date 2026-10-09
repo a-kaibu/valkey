@@ -125,7 +125,7 @@ void zvaddCommand(client *c) {
 void zvremCommand(client *c) {
     robj *key = c->argv[1];
     robj *zobj;
-    int deleted = 0, j;
+    int deleted = 0, keyremoved = 0, j;
 
     if ((zobj = lookupKeyWriteOrReply(c, key, shared.czero)) == NULL || checkType(c, zobj, OBJ_ZVSET))
         return;
@@ -135,11 +135,14 @@ void zvremCommand(client *c) {
     for (j = 2; j < c->argc; j++) {
         if (zvsetDel(zs, objectGetVal(c->argv[j]))) deleted++;
         if (zvsetLength(zs) == 0) {
+            /* dbDelete() frees zobj (and zs/ht with it); do not touch
+             * zs afterwards. */
             dbDelete(c->db, key);
+            keyremoved = 1;
             break;
         }
     }
-    hashtableResumeAutoShrink(zs->ht);
+    if (!keyremoved) hashtableResumeAutoShrink(zs->ht);
 
     if (deleted) {
         signalModifiedKey(c, c->db, key);

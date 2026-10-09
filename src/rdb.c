@@ -2704,20 +2704,20 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error, int rd
                 return NULL;
             }
             double *vals = zmalloc(sizeof(double) * (size_t)dimslen);
-            int load_failed = 0;
+            int io_failed = 0, bad_score = 0;
             for (uint64_t i = 0; i < dimslen; i++) {
                 if (rdbLoadBinaryDoubleValue(rdb, &vals[i]) == -1) {
-                    load_failed = 1;
+                    io_failed = 1;
                     break;
                 }
-                if (isnan(vals[i])) load_failed = 1;
+                if (isnan(vals[i])) bad_score = 1;
                 if (vals[i] == 0.0) vals[i] = 0.0;
             }
-            if (load_failed) {
+            if (io_failed || bad_score) {
                 zfree(vals);
                 sdsfree(member);
                 decrRefCount(o);
-                if (!load_failed) rdbReportCorruptRDB("Zvset with NAN score detected");
+                if (bad_score) rdbReportCorruptRDB("Zvset with NAN score detected");
                 return NULL;
             }
             zvScore *score = zmalloc(sizeof(*score) + sizeof(double) * (size_t)dimslen);

@@ -219,8 +219,45 @@ start_server {tags {"zvset"}} {
         }
     }
 
-    test "ZV randomized correctness vs reference model" {
-        expr {srand(424242)}
+    test "ZV binary member round-trip" {
+        r del x
+        set m1 "a b"
+        set m2 [binary format "H*" "6100ff63"]
+        assert_equal 1 [r zvadd x 1#2 $m1]
+        assert_equal 1 [r zvadd x 3#4 $m2]
+        assert_equal [list $m1 $m2] [r zvrange x 0 -1]
+        assert_equal {3#4} [r zvscore x $m2]
+        assert_equal 1 [r zvrank x $m2]
+        assert_equal 0 [r zvrank x $m1]
+        assert_equal 1 [r zvrem x $m2]
+        assert_equal 1 [r zvcard x]
+    }
+
+    test "ZV 255 dimensions accepted, 256 rejected" {
+        r del x
+        set s255 [join [lrepeat 255 1] "#"]
+        set s256 [join [lrepeat 256 1] "#"]
+        assert_equal 1 [r zvadd x $s255 a]
+        assert_equal 1 [r zvcard x]
+        assert_equal $s255 [r zvscore x a]
+        catch [list r zvadd x 1#2 c] err
+        assert_match "*dimension*" $err
+        catch [list r zvadd ydim256 $s256 a] err
+        assert_match "*invalid vector*" $err
+        assert_equal 0 [r exists ydim256]
+    }
+
+    test "ZV long common prefix orders by last dimension" {
+        zv_create x 5#5#5#5#5#5#5#30 m3 5#5#5#5#5#5#5#10 m1 5#5#5#5#5#5#5#20 m2
+        assert_equal {m1 m2 m3} [r zvrange x 0 -1]
+        assert_equal 0 [r zvrank x m1]
+        assert_equal 2 [r zvrank x m3]
+        # identical full vectors tie-break by member
+        r zvadd x 5#5#5#5#5#5#5#10 m0
+        assert_equal {m0 m1 m2 m3} [r zvrange x 0 -1]
+    }
+
+    test "ZV randomized correctness vs reference model" {        expr {srand(424242)}
         set key "zvrand"
         r del $key
         set ref {}
@@ -266,5 +303,19 @@ start_server {tags {"zvset"}} {
             }
         }
         zv_check $key $ref
+    }
+}
+
+start_server {tags {"zvset needs:debug"} overrides {appendonly yes aof-use-rdb-preamble no}} {
+    test {AOF rewrite and reload preserve ZVSET values} {
+        r zvadd ranking 100#15#3 alice 100#16#1 bob 101#1#9 carol
+        r bgrewriteaof
+        waitForBgrewriteaof r
+        r debug loadaof
+        assert_equal {zvset} [r type ranking]
+        assert_equal {alice bob carol} [r zvrange ranking 0 -1]
+        assert_equal {100#16#1} [r zvscore ranking bob]
+        assert_equal 2 [r zvrank ranking carol]
+        assert_equal 3 [r zvcard ranking]
     }
 }

@@ -105,8 +105,11 @@ key単位で固定。最初の `ZVADD` で確定し、以降の不一致は
 | AOF rewrite| `ZVADD` 再発行 (`rewriteZvsetObject()`)                 |
 | defrag     | `fbtreeDefragScan()` + hashtable pointer更新callback    |
 
-計算量目標: `ZVADD O(d+logN)`, `ZVREM O(logN)`, `ZVSCORE O(1+d)`,
+計算量目標: `ZVADD O(d·logN)` (worst; tree探索中の各キー比較がvector長に
+依存するため。fbtreeはprefix特徴量を活用するので常に最悪になるわけではない),
+`ZVREM O(logN)`, `ZVSCORE O(1+d)`,
 `ZVRANK O(logN)`, `ZVRANGE O(logN+M)`, `ZVCARD O(1)`。
+`d` 依存の定量化には先頭次元が同一のworkload B (`shared`) 測定が重要。
 
 ## 変更ファイル
 
@@ -126,23 +129,37 @@ key単位で固定。最初の `ZVADD` で確定し、以降の不一致は
 
 ## benchmark結果 (baseline, N=100k, loopback, dev機・参考値)
 
-`utils/zv_benchmark.tcl` (--n 100000 --dims "1 2 4 8 16"):
+`utils/zv_benchmark.tcl` (--n 100000 --dims "1 2 4 8 16"
+--dists "spread shared")。値はbatch中央値ops/sec。
+`spread` は先頭次元で決着しやすい分布、`shared` は最終次元まで
+比較する分布 (workload B)。
 
-| test               | d1      | d2     | d4     | d8     | d16    | ZSET   |
-|--------------------|---------|--------|--------|--------|--------|--------|
-| ZVADD insert o/s   | 1063k   | 914k   | 972k   | 873k   | 647k   | 1164k  |
-| ZVADD update o/s   | 1023k   | 922k   | 920k   | 668k   | 581k   | 1038k  |
-| ZVRANK o/s         | 382k    | 326k   | 425k   | 334k   | 280k   | 328k   |
-| ZVSCORE o/s        | 645k    | 673k   | 797k   | 478k   | 354k   | 784k   |
-| ZVRANGE 0-99 o/s   | 13200   | 9190   | 11150  | 12670  | 9660   | 13710  |
-| RANGE+scores o/s   | 6500    | 4750   | 5790   | 4900   | 3870   | 6710   |
-| MEMORY (100k)      | 4.75MB  | 5.55MB | 7.15MB | 10.35MB| 18.35MB| 4.75MB |
+spread:
+
+| test               | d1     | d2    | d4    | d8    | d16   | ZSET  |
+|--------------------|--------|-------|-------|-------|-------|-------|
+| ZVADD insert o/s   | 893k   | 849k  | 713k  | 669k  | 568k  | 847k  |
+| ZVADD update o/s   | 811k   | 742k  | 690k  | 633k  | 509k  | 824k  |
+| ZVRANK o/s         | 840k   | —     | —     | —     | 781k  | 935k  |
+| ZVSCORE o/s        | 645k   | —     | —     | —     | 465k  | 862k  |
+| ZVRANGE 0-99 o/s   | 14320  | —     | —     | —     | 14045 | 14148 |
+| RANGE+scores o/s   | 7049   | —     | —     | —     | 3880  | 6769  |
+| MEMORY (100k)      | 4.75MB | 5.55MB| 7.15MB| 10.35MB|18.35MB| 4.75MB|
+
+shared (workload B):
+
+| test               | d1    | d2    | d4    | d8    | d16   |
+|--------------------|-------|-------|-------|-------|-------|
+| ZVADD insert o/s   | 783k  | 882k  | 818k  | 726k  | 603k  |
+| ZVADD update o/s   | 817k  | 781k  | 731k  | 646k  | 538k  |
+| MEMORY (100k)      | 4.75MB| 5.86MB| 7.37MB| 10.44MB|18.86MB|
 
 読み方:
 
-- d1のZVはZSETの約0.9倍 (同等)。tree自体にdimension依存処理なし。
-- d1→d16でinsert約0.6倍、RANK約0.7倍。劣化は主に
+- d1のZVはZSETと同等 (insert 893k vs 847k)。tree自体にdimension依存処理なし。
+- d1→d16でinsert約0.64倍 (spread/sharedとも)。劣化は主に
   encoding/decoding・packed key size・byte比較・memory bandwidth。
+  shared分布でも同程度であり、最悪寄りワークロードでも崩れない。
 - MEMORYは `1+8d` B/memberのリニア増加 + fbtree overhead。
 - p50/p99はloopback RTT参考値 (CI artifactのTSVに記録)。
 
