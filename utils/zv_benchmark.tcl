@@ -15,7 +15,13 @@
 #
 # Bulk phases are sent in --batch sized pipelines and the median batch
 # throughput is reported (more robust than one giant pipeline, and the
-# client no longer buffers all N commands at once).
+# client no longer buffers all N commands at once). RANK/SCORE
+# throughput uses --samples pipelined lookups (default 5000); RTT
+# p50/p99 uses --rtts sequential samples (default 1000).
+#
+# Each (dist, dims) condition is measured in isolation: all other
+# benchmark keys are deleted and freed pages purged first, so memory
+# pressure and cache state stay comparable across conditions.
 #
 # Latency p50/p99 are client-observed loopback RTT samples (server +
 # stack), useful for relative comparison, not absolute server latency.
@@ -24,13 +30,13 @@
 # Usage:
 #   tclsh utils/zv_benchmark.tcl [--port 6379] [--n 1000000] \
 #       [--dims "1 2 4 8 16"] [--dists "spread shared"] [--batch 5000] \
-#       [--samples 200] [--out results.tsv]
+#       [--samples 5000] [--rtts 1000] [--out results.tsv]
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
 package require Tcl 8.6
 
-array set opt {port 6379 n 1000000 dims {1 2 4 8 16} dists {spread shared} batch 5000 samples 200 out ""}
+array set opt {port 6379 n 1000000 dims {1 2 4 8 16} dists {spread shared} batch 5000 samples 5000 rtts 1000 out ""}
 for {set i 0} {$i < $argc} {incr i} {
     set a [lindex $argv $i]
     switch -- $a {
@@ -40,6 +46,7 @@ for {set i 0} {$i < $argc} {incr i} {
         --dists {incr i; set opt(dists) [lindex $argv $i]}
         --batch {incr i; set opt(batch) [lindex $argv $i]}
         --samples {incr i; set opt(samples) [lindex $argv $i]}
+        --rtts {incr i; set opt(rtts) [lindex $argv $i]}
         --out {incr i; set opt(out) [lindex $argv $i]}
         default {puts stderr "unknown arg: $a"; exit 2}
     }
@@ -173,6 +180,22 @@ proc member {i} {
     return [format "m%07d" $i]
 }
 
+# Delete every other benchmark key so each condition is measured with
+# only its own key in memory (constant memory pressure / cache state),
+# then purge freed pages back to the OS.
+proc isolate_key {fd keep} {
+    foreach pat {zvbench:* zbench} {
+        set keys [req $fd KEYS $pat]
+        foreach k $keys {
+            if {$k ne $keep} {
+                req $fd DEL $k
+            }
+        }
+    }
+    req $fd DEL $keep
+    catch {req $fd MEMORY PURGE}
+}
+
 proc zvadd_cmd {key dims g dist i} {
     return [list ZVADD $key [genvec $i $dims $g $dist] [member $i]]
 }
@@ -198,7 +221,7 @@ puts "ZV PoC benchmark: N=$N batch=$B dims=($opt(dims)) dists=($opt(dists)) port
 foreach dist $opt(dists) {
     foreach dims $opt(dims) {
         set key "zvbench:$dist:d$dims"
-        req $fd DEL $key
+        isolate_key $fd $key
 
         # --- insert ---
         lassign [run_batches $fd $N $B [list zvadd_cmd $key $dims 0 $dist]] med tot nb
@@ -224,7 +247,7 @@ foreach dist $opt(dists) {
         foreach {name cmds} [list ZVRANK $rankcmds ZVSCORE $scorecmds] {
             set ms [pipeline $fd $cmds]
             set ops [expr {$S / ($ms / 1000.0)}]
-            lassign [sample_rtt $fd [lrange $cmds 0 199]] avg p50 p99
+            lassign [sample_rtt $fd [lrange $cmds 0 [expr {$opt(rtts) - 1}]]] avg p50 p99
             puts [format "%-6s dims=%-3s %-12s %10.0f ops/sec  rtt avg=%.1fus p50=%.1fus p99=%.1fus" \
                 $dist $dims $name $ops $avg $p50 $p99]
             lappend results [list $dims $dist $name $ops $p50 $p99]
@@ -253,7 +276,7 @@ foreach dist $opt(dists) {
 }
 
 # --- ZSET baseline (dimension 1 equivalent) ---
-req $fd DEL zbench
+isolate_key $fd zbench
 lassign [run_batches $fd $N $B [list zadd_cmd zbench 0]] med tot nb
 puts [format "ZSET      ZADD-insert    median %10.0f ops/sec (total %10.0f, %d batches)" $med $tot $nb]
 lappend results [list 1 spread ZSET-ZADD-insert $med "" ""]
@@ -270,7 +293,7 @@ for {set s 0} {$s < $S} {incr s} {
 }
 foreach {name cmds} [list ZRANK $rankcmds ZSCORE $scorecmds] {
     set ms [pipeline $fd $cmds]
-    lassign [sample_rtt $fd [lrange $cmds 0 199]] avg p50 p99
+    lassign [sample_rtt $fd [lrange $cmds 0 [expr {$opt(rtts) - 1}]]] avg p50 p99
     puts [format "ZSET      %-12s %10.0f ops/sec  rtt avg=%.1fus p50=%.1fus p99=%.1fus" \
         $name [expr {$S / ($ms / 1000.0)}] $avg $p50 $p99]
     lappend results [list 1 spread ZSET-$name [expr {$S / ($ms / 1000.0)}] $p50 $p99]
