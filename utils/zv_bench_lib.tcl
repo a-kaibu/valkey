@@ -262,8 +262,9 @@ namespace eval zvbench {
 
     # Collapse per-repeat rows into median rows. Grouped by
     # {dims dist op} plus the stable condition keys in extra (K,
-    # overlap, M, ...); volatile keys (memory_bytes) are excluded so
-    # different workloads never merge into one median. ops/p50/p99 take
+    # overlap, M, ...); volatile measurement keys (memory_bytes,
+    # elapsed_ms) are excluded so repeats of one condition always
+    # collapse into a single median. ops/p50/p99 take
     # medians, min/max go to extra as rep_min/rep_max with repeat count.
     # Preserves the first-seen condition order.
     proc collapse_results {} {
@@ -275,7 +276,7 @@ namespace eval zvbench {
             set keyparts [list $dims $dist $op]
             # Stable condition keys, sorted for determinism.
             foreach k [lsort [dict keys $extra]] {
-                if {$k eq "memory_bytes"} continue
+                if {$k eq "memory_bytes" || $k eq "elapsed_ms"} continue
                 lappend keyparts $k [dict get $extra $k]
             }
             set k [join $keyparts "\t"]
@@ -285,6 +286,7 @@ namespace eval zvbench {
                 set g($k,ops) {}
                 set g($k,p50) {}
                 set g($k,p99) {}
+                set g($k,elapsed) {}
                 set g($k,extra) $extra
                 set g($k,dims) $dims
                 set g($k,dist) $dist
@@ -294,6 +296,9 @@ namespace eval zvbench {
             lappend g($k,ops) $ops
             if {$p50 ne ""} {lappend g($k,p50) $p50}
             if {$p99 ne ""} {lappend g($k,p99) $p99}
+            if {[dict exists $extra elapsed_ms]} {
+                lappend g($k,elapsed) [dict get $extra elapsed_ms]
+            }
         }
         set out {}
         foreach k $order {
@@ -303,6 +308,9 @@ namespace eval zvbench {
             dict set extra rep_min [lindex $ops 0]
             dict set extra rep_max [lindex $ops end]
             dict set extra reps $g($k,n)
+            if {[llength $g($k,elapsed)] > 0} {
+                dict set extra elapsed_ms [percentile [lsort -real $g($k,elapsed)] 0.50]
+            }
             set p50 ""
             set p99 ""
             if {[llength $g($k,p50)] > 0} {
