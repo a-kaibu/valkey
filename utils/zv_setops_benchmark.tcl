@@ -20,7 +20,7 @@ package require Tcl 8.6
 set here [file dirname [info script]]
 source [file join $here zv_bench_lib.tcl]
 
-array set opt {port 6379 n 100000 dims 4 keys {2 4} overlaps {0 10 50 90 100} batch 5000 out "" json ""}
+array set opt {port 6379 n 100000 dims 4 keys {2 4} overlaps {0 10 50 90 100} batch 5000 repeats 5 out "" json ""}
 for {set i 0} {$i < $argc} {incr i} {
     set a [lindex $argv $i]
     switch -- $a {
@@ -30,6 +30,7 @@ for {set i 0} {$i < $argc} {incr i} {
         --keys {incr i; set opt(keys) [lindex $argv $i]}
         --overlaps {incr i; set opt(overlaps) [lindex $argv $i]}
         --batch {incr i; set opt(batch) [lindex $argv $i]}
+        --repeats {incr i; set opt(repeats) [lindex $argv $i]}
         --out {incr i; set opt(out) [lindex $argv $i]}
         --json {incr i; set opt(json) [lindex $argv $i]}
         default {puts stderr "unknown arg: $a"; exit 2}
@@ -77,10 +78,18 @@ set N $opt(n)
 set dims $opt(dims)
 zvbench::reset_results
 
-puts "ZV setops benchmark: N=$N dims=$dims keys=($opt(keys)) overlaps=($opt(overlaps))"
+puts "ZV setops benchmark: N=$N dims=$dims keys=($opt(keys)) overlaps=($opt(overlaps)) repeats=$opt(repeats)"
 
+set conds {}
 foreach k $opt(keys) {
     foreach overlap $opt(overlaps) {
+        lappend conds [list $k $overlap]
+    }
+}
+for {set rep 0} {$rep < $opt(repeats)} {incr rep} {
+puts "--- repeat [expr {$rep + 1}]/$opt(repeats) ---"
+foreach cond [zvbench::rotated $conds $rep] {
+lassign $cond k overlap
         set prefix "zvsetops:k$k:o$overlap"
         foreach pat [list "$prefix:*" zvsetops:dst] {
             foreach old [zvbench::req $fd KEYS $pat] {
@@ -141,6 +150,9 @@ foreach k $opt(keys) {
         }
     }
 }
+
+zvbench::collapse_results
+zvbench::print_medians
 
 close $fd
 

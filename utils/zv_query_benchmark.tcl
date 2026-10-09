@@ -17,7 +17,7 @@ package require Tcl 8.6
 set here [file dirname [info script]]
 source [file join $here zv_bench_lib.tcl]
 
-array set opt {port 6379 n 100000 dims 4 batch 5000 out "" json ""}
+array set opt {port 6379 n 100000 dims 4 batch 5000 repeats 5 out "" json ""}
 for {set i 0} {$i < $argc} {incr i} {
     set a [lindex $argv $i]
     switch -- $a {
@@ -25,6 +25,7 @@ for {set i 0} {$i < $argc} {incr i} {
         --n {incr i; set opt(n) [lindex $argv $i]}
         --dims {incr i; set opt(dims) [lindex $argv $i]}
         --batch {incr i; set opt(batch) [lindex $argv $i]}
+        --repeats {incr i; set opt(repeats) [lindex $argv $i]}
         --out {incr i; set opt(out) [lindex $argv $i]}
         --json {incr i; set opt(json) [lindex $argv $i]}
         default {puts stderr "unknown arg: $a"; exit 2}
@@ -47,8 +48,10 @@ set N $opt(n)
 set dims $opt(dims)
 zvbench::reset_results
 
-puts "ZV query benchmark: N=$N dims=$dims"
+puts "ZV query benchmark: N=$N dims=$dims repeats=$opt(repeats)"
 
+for {set rep 0} {$rep < $opt(repeats)} {incr rep} {
+puts "--- repeat [expr {$rep + 1}]/$opt(repeats) ---"
 set key "zvquery:d$dims"
 zvbench::isolate_key $fd $key
 # Independent dims (rand_uniform) so multi-filter conjunctions reduce
@@ -95,6 +98,10 @@ foreach lim {10 100 1000} {
     zvbench::row $dims spread QUERY-limit$lim [expr {$m / ($us / 1000000.0)}] "" "" \
         [dict create limit $lim matched $m scanned $N]
 }
+} ;# end repeat loop
+
+zvbench::collapse_results
+zvbench::print_medians
 
 close $fd
 

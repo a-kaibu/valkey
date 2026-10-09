@@ -273,33 +273,33 @@ start_server {tags {"zvset"}} {
     }
 
     test "ZVRANGESTORE" {
-        zv_create src 1 a 2 b 3 c 4 d
-        assert_equal 2 [r zvrangestore rdst src 1 2]
-        assert_equal {b c} [r zvrange rdst 0 -1]
-        assert_equal {zvset} [r type rdst]
+        zv_create src{zvr} 1 a 2 b 3 c 4 d
+        assert_equal 2 [r zvrangestore rdst{zvr} src{zvr} 1 2]
+        assert_equal {b c} [r zvrange rdst{zvr} 0 -1]
+        assert_equal {zvset} [r type rdst{zvr}]
         # byscore + rev + limit (stored set reads back in vector order)
-        assert_equal 2 [r zvrangestore rdst2 src 4 1 byscore rev limit 0 2]
-        assert_equal {c d} [r zvrange rdst2 0 -1]
+        assert_equal 2 [r zvrangestore rdst2{zvr} src{zvr} 4 1 byscore rev limit 0 2]
+        assert_equal {c d} [r zvrange rdst2{zvr} 0 -1]
         # bylex on uniform source
-        zv_create srclex 1#1 a 1#1 b 1#1 c
-        assert_equal 2 [r zvrangestore rdst3 srclex {[b} {[c} bylex]
-        assert_equal {b c} [r zvrange rdst3 0 -1]
+        zv_create srclex{zvr} 1#1 a 1#1 b 1#1 c
+        assert_equal 2 [r zvrangestore rdst3{zvr} srclex{zvr} {[b} {[c} bylex]
+        assert_equal {b c} [r zvrange rdst3{zvr} 0 -1]
         # src == dst works
-        assert_equal 2 [r zvrangestore src src 1 2]
-        assert_equal {b c} [r zvrange src 0 -1]
+        assert_equal 2 [r zvrangestore src{zvr} src{zvr} 1 2]
+        assert_equal {b c} [r zvrange src{zvr} 0 -1]
         # empty result deletes destination
-        r zvadd keep 1#1 z
-        assert_equal 0 [r zvrangestore keep src 5 9]
-        assert_equal 0 [r exists keep]
+        r zvadd keep{zvr} 1#1 z
+        assert_equal 0 [r zvrangestore keep{zvr} src{zvr} 5 9]
+        assert_equal 0 [r exists keep{zvr}]
         # missing source deletes destination, returns 0
-        r zvadd keep2 1#1 z
-        assert_equal 0 [r zvrangestore keep2 nosuchkey 0 -1]
-        assert_equal 0 [r exists keep2]
+        r zvadd keep2{zvr} 1#1 z
+        assert_equal 0 [r zvrangestore keep2{zvr} nosuchkey{zvr} 0 -1]
+        assert_equal 0 [r exists keep2{zvr}]
         # dimension change replaces wholesale
-        r zvadd other 1#1#1 q
-        assert_equal 2 [r zvrangestore other src 0 1]
-        assert_equal {b c} [r zvrange other 0 -1]
-        assert_equal {2} [r zvscore other b]
+        r zvadd other{zvr} 1#1#1 q
+        assert_equal 2 [r zvrangestore other{zvr} src{zvr} 0 1]
+        assert_equal {b c} [r zvrange other{zvr} 0 -1]
+        assert_equal {2} [r zvscore other{zvr} b]
     }
 
     test "ZVREMRANGEBYRANK" {
@@ -356,13 +356,13 @@ start_server {tags {"zvset"}} {
     }
 
     test "ZVMPOP multi-key order" {
-        r del k1 k2
-        r zvadd k2 1#1 x 2#2 y
-        assert_equal {k2 {{x 1#1}}} [r zvmpop 2 k1 k2 min count 1]
-        assert_equal {k2 {{y 2#2}}} [r zvmpop 2 k1 k2 max]
-        assert_equal 0 [r exists k2]
+        r del k1{zvm} k2{zvm}
+        r zvadd k2{zvm} 1#1 x 2#2 y
+        assert_equal {k2{zvm} {{x 1#1}}} [r zvmpop 2 k1{zvm} k2{zvm} min count 1]
+        assert_equal {k2{zvm} {{y 2#2}}} [r zvmpop 2 k1{zvm} k2{zvm} max]
+        assert_equal 0 [r exists k2{zvm}]
         assert_equal {} [r zvmpop 1 nokey min]
-        assert_error "*syntax*" {r zvmpop 1 k1 badwhere}
+        assert_error "*syntax*" {r zvmpop 1 k1{zvm} badwhere}
     }
 
     test "ZVRANDMEMBER" {
@@ -460,17 +460,12 @@ start_server {tags {"zvset"}} {
         assert_error "*WRONGTYPE*" {r zvrem x a}
     }
 
-    test "ZV TYPE, COPY, RDB reload round-trip" {
-        zv_create src 1#10 c 1#2 b 1#2 a
-        assert_equal {zvset} [r type src]
-        assert_equal 1 [r copy src dst]
-        assert_equal {a b c} [r zvrange dst 0 -1]
-        assert_equal {1#2} [r zvscore dst a]
-        r debug reload
-        assert_equal {zvset} [r type src]
-        assert_equal {a b c} [r zvrange src 0 -1]
-        assert_equal {1#10} [r zvscore src c]
-        assert_equal {a b c} [r zvrange dst 0 -1]
+    test "ZV TYPE and COPY" {
+        zv_create src{zv} 1#10 c 1#2 b 1#2 a
+        assert_equal {zvset} [r type src{zv}]
+        assert_equal 1 [r copy src{zv} dst{zv}]
+        assert_equal {a b c} [r zvrange dst{zv} 0 -1]
+        assert_equal {1#2} [r zvscore dst{zv} a]
     }
 
     # Reference model comparison: vector lexicographic, then member.
@@ -557,7 +552,7 @@ start_server {tags {"zvset"}} {
         set seed 424242
         puts "zv fuzz seed: $seed"
         expr {srand($seed)}
-        set key "zvrand"
+        set key "zvrand{zvf}"
         r del $key
         set ref {}
         set dims 3
@@ -689,8 +684,7 @@ start_server {tags {"zvset"}} {
 }
 
 start_server {tags {"zvset needs:debug"} overrides {appendonly yes aof-use-rdb-preamble no}} {
-    test {AOF rewrite and reload preserve ZVSET values} {
-        r zvadd ranking 100#15#3 alice 100#16#1 bob 101#1#9 carol
+    test {AOF rewrite and reload preserve ZVSET values} {        r zvadd ranking 100#15#3 alice 100#16#1 bob 101#1#9 carol
         r bgrewriteaof
         waitForBgrewriteaof r
         r debug loadaof
@@ -700,86 +694,94 @@ start_server {tags {"zvset needs:debug"} overrides {appendonly yes aof-use-rdb-p
         assert_equal 2 [r zvrank ranking carol]
         assert_equal 3 [r zvcard ranking]
     }
+
+    test {RDB reload preserves ZVSET values} {
+        r zvadd rdbkey 1#10 c 1#2 b 1#2 a
+        r debug reload
+        assert_equal {zvset} [r type rdbkey]
+        assert_equal {a b c} [r zvrange rdbkey 0 -1]
+        assert_equal {1#10} [r zvscore rdbkey c]
+    }
 }
 
 start_server {tags {"zvset-setops"}} {    proc zv_setup_setops {} {
-        r del a b u v w
-        r zvadd a 10#20 alice 20#0 bob 1#5 carol
-        r zvadd b 3#7 alice 30#0 bob 4#9 dave
+        r del a{zvs} b{zvs} u{zvs} v{zvs} w{zvs}
+        r zvadd a{zvs} 10#20 alice 20#0 bob 1#5 carol
+        r zvadd b{zvs} 3#7 alice 30#0 bob 4#9 dave
     }
 
     test "ZVUNION SUM default" {
         zv_setup_setops
-        assert_equal {carol dave alice bob} [r zvunion 2 a b]
-        assert_equal {carol 1#5 dave 4#9 alice 13#27 bob 50#0} [r zvunion 2 a b withscores]
+        assert_equal {carol dave alice bob} [r zvunion 2 a{zvs} b{zvs}]
+        assert_equal {carol 1#5 dave 4#9 alice 13#27 bob 50#0} [r zvunion 2 a{zvs} b{zvs} withscores]
     }
 
     test "ZVUNION MIN MAX are vector-wide" {
         zv_setup_setops
         # MIN picks whole vectors: alice=[3,7] (not [3,20]).
-        assert_equal {carol alice dave bob} [r zvunion 2 a b aggregate min]
-        assert_equal {carol 1#5 alice 3#7 dave 4#9 bob 20#0} [r zvunion 2 a b aggregate min withscores]
-        assert_equal {carol dave alice bob} [r zvunion 2 a b aggregate max]
-        assert_equal {carol 1#5 dave 4#9 alice 10#20 bob 30#0} [r zvunion 2 a b aggregate max withscores]
+        assert_equal {carol alice dave bob} [r zvunion 2 a{zvs} b{zvs} aggregate min]
+        assert_equal {carol 1#5 alice 3#7 dave 4#9 bob 20#0} [r zvunion 2 a{zvs} b{zvs} aggregate min withscores]
+        assert_equal {carol dave alice bob} [r zvunion 2 a{zvs} b{zvs} aggregate max]
+        assert_equal {carol 1#5 dave 4#9 alice 10#20 bob 30#0} [r zvunion 2 a{zvs} b{zvs} aggregate max withscores]
     }
 
     test "ZVUNION WEIGHTS" {
         zv_setup_setops
-        assert_equal {carol dave alice bob} [r zvunion 2 a b weights 2 3]
-        assert_equal {carol 2#10 dave 12#27 alice 29#61 bob 130#0} [r zvunion 2 a b weights 2 3 withscores]
+        assert_equal {carol dave alice bob} [r zvunion 2 a{zvs} b{zvs} weights 2 3]
+        assert_equal {carol 2#10 dave 12#27 alice 29#61 bob 130#0} [r zvunion 2 a{zvs} b{zvs} weights 2 3 withscores]
         # negative weight
-        assert_equal {bob -20#0 alice -10#-20 carol -1#-5} [r zvunion 1 a weights -1 withscores]
+        assert_equal {bob -20#0 alice -10#-20 carol -1#-5} [r zvunion 1 a{zvs} weights -1 withscores]
     }
 
     test "ZVINTER SUM and missing keys" {
         zv_setup_setops
-        assert_equal {alice bob} [r zvinter 2 a b]
-        assert_equal {alice 13#27 bob 50#0} [r zvinter 2 a b withscores]
+        assert_equal {alice bob} [r zvinter 2 a{zvs} b{zvs}]
+        assert_equal {alice 13#27 bob 50#0} [r zvinter 2 a{zvs} b{zvs} withscores]
         # missing keys are empty sets: intersection is empty
-        assert_equal {} [r zvinter 3 a b nokey]
-        assert_equal {} [r zvinter 2 a nokey]
+        assert_equal {} [r zvinter 3 a{zvs} b{zvs} nokey]
+        assert_equal {} [r zvinter 2 a{zvs} nokey]
         # duplicate input keys aggregate per input position (SUM doubles)
-        assert_equal {carol 2#10 alice 20#40 bob 40#0} [r zvinter 2 a a withscores]
+        assert_equal {carol 2#10 alice 20#40 bob 40#0} [r zvinter 2 a{zvs} a{zvs} withscores]
     }
 
     test "ZVDIFF keeps first-key vectors" {
         zv_setup_setops
-        assert_equal {carol} [r zvdiff 2 a b]
-        assert_equal {carol 1#5} [r zvdiff 2 a b withscores]
-        assert_equal {carol alice bob} [r zvdiff 2 a nokey]
-        assert_equal {} [r zvdiff 2 nokey a]
+        assert_equal {carol} [r zvdiff 2 a{zvs} b{zvs}]
+        assert_equal {carol 1#5} [r zvdiff 2 a{zvs} b{zvs} withscores]
+        assert_equal {carol alice bob} [r zvdiff 2 a{zvs} nokey]
+        assert_equal {} [r zvdiff 2 nokey a{zvs}]
     }
 
     test "ZVINTERCARD with LIMIT" {
         zv_setup_setops
-        assert_equal 2 [r zvintercard 2 a b]
-        assert_equal 1 [r zvintercard 2 a b limit 1]
-        assert_equal 0 [r zvintercard 2 a nokey]
-        assert_error "*negative*" {r zvintercard 2 a b limit -1}
+        assert_equal 2 [r zvintercard 2 a{zvs} b{zvs}]
+        assert_equal 1 [r zvintercard 2 a{zvs} b{zvs} limit 1]
+        assert_equal 0 [r zvintercard 2 a{zvs} nokey]
+        assert_error "*negative*" {r zvintercard 2 a{zvs} b{zvs} limit -1}
     }
 
     test "ZVUNIONSTORE INTERSTORE DIFFSTORE" {
         zv_setup_setops
-        assert_equal 4 [r zvunionstore u 2 a b]
-        assert_equal {carol dave alice bob} [r zvrange u 0 -1]
-        assert_equal 2 [r zvinterstore v 2 a b]
-        assert_equal {alice bob} [r zvrange v 0 -1]
-        assert_equal 1 [r zvdiffstore w 2 a b]
-        assert_equal {carol} [r zvrange w 0 -1]
+        assert_equal 4 [r zvunionstore u{zvs} 2 a{zvs} b{zvs}]
+        assert_equal {carol dave alice bob} [r zvrange u{zvs} 0 -1]
+        assert_equal 2 [r zvinterstore v{zvs} 2 a{zvs} b{zvs}]
+        assert_equal {alice bob} [r zvrange v{zvs} 0 -1]
+        assert_equal 1 [r zvdiffstore w{zvs} 2 a{zvs} b{zvs}]
+        assert_equal {carol} [r zvrange w{zvs} 0 -1]
         # empty result deletes destination
-        r zvadd keep 1#1 z
-        assert_equal 0 [r zvinterstore keep 2 a nokey2]
-        assert_equal 0 [r exists keep]
+        r zvadd keep{zvs} 1#1 z
+        assert_equal 0 [r zvinterstore keep{zvs} 2 a{zvs} nokey2{zvs}]
+        assert_equal 0 [r exists keep{zvs}]
         # dst == src works (vectors doubled by self-union SUM)
-        assert_equal 3 [r zvunionstore a 1 a]
-        assert_equal {carol alice bob} [r zvrange a 0 -1]
+        assert_equal 3 [r zvunionstore a{zvs} 1 a{zvs}]
+        assert_equal {carol alice bob} [r zvrange a{zvs} 0 -1]
         # dimension mismatch
-        r zvadd dd 1#2#3 q
-        assert_error "*dimension*" {r zvunion 2 a dd}
-        assert_error "*dimension*" {r zvunionstore u2 2 a dd}
+        r zvadd dd{zvs} 1#2#3 q
+        assert_error "*dimension*" {r zvunion 2 a{zvs} dd{zvs}}
+        assert_error "*dimension*" {r zvunionstore u2{zvs} 2 a{zvs} dd{zvs}}
         # wrong type
-        r set s str
-        assert_error "*WRONGTYPE*" {r zvunion 2 a s}
+        r set s{zvs} str
+        assert_error "*WRONGTYPE*" {r zvunion 2 a{zvs} s{zvs}}
     }
 }
 
@@ -803,11 +805,11 @@ start_server {tags {"zvset-blocking"}} {    test "BZVPOPMIN wake-up on ZVADD" {
     }
 
     test "BZVPOPMIN multi-key order" {
-        r del k1 k2
-        r zvadd k2 1#1 x
+        r del k1{zvm} k2{zvm}
+        r zvadd k2{zvm} 1#1 x
         set rd [valkey_deferring_client]
-        $rd bzvpopmin k1 k2 5
-        assert_equal {k2 x 1#1} [$rd read]
+        $rd bzvpopmin k1{zvm} k2{zvm} 5
+        assert_equal {k2{zvm} x 1#1} [$rd read]
         $rd close
     }
 

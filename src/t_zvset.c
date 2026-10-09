@@ -88,7 +88,8 @@ static void zvaddGenericCommand(client *c, int base_flags) {
         if (j == 0) {
             dims = s->len;
         } else if (s->len != dims) {
-            for (int k = 0; k <= j; k++) zvScoreFree(scores[k]);
+            zvScoreFree(s);
+            for (int k = 0; k < j; k++) zvScoreFree(scores[k]);
             zfree(scores);
             addReplyError(c, "all vector scores must have the same dimension");
             return;

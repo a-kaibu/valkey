@@ -19,7 +19,7 @@ package require Tcl 8.6
 set here [file dirname [info script]]
 source [file join $here zv_bench_lib.tcl]
 
-array set opt {port 6379 n 100000 dims {4 16} dists {spread shared} msizes {1 10 100 1000 10000} batch 5000 out "" json ""}
+array set opt {port 6379 n 100000 dims {4 16} dists {spread shared} msizes {1 10 100 1000 10000} batch 5000 repeats 5 out "" json ""}
 for {set i 0} {$i < $argc} {incr i} {
     set a [lindex $argv $i]
     switch -- $a {
@@ -29,6 +29,7 @@ for {set i 0} {$i < $argc} {incr i} {
         --dists {incr i; set opt(dists) [lindex $argv $i]}
         --msizes {incr i; set opt(msizes) [lindex $argv $i]}
         --batch {incr i; set opt(batch) [lindex $argv $i]}
+        --repeats {incr i; set opt(repeats) [lindex $argv $i]}
         --out {incr i; set opt(out) [lindex $argv $i]}
         --json {incr i; set opt(json) [lindex $argv $i]}
         default {puts stderr "unknown arg: $a"; exit 2}
@@ -90,10 +91,18 @@ set N $opt(n)
 set B $opt(batch)
 zvbench::reset_results
 
-puts "ZV range benchmark: N=$N batch=$B dims=($opt(dims)) dists=($opt(dists))"
+puts "ZV range benchmark: N=$N batch=$B dims=($opt(dims)) dists=($opt(dists)) repeats=$opt(repeats)"
 
+set conds {}
 foreach dist $opt(dists) {
     foreach dims $opt(dims) {
+        lappend conds [list $dist $dims]
+    }
+}
+for {set rep 0} {$rep < $opt(repeats)} {incr rep} {
+puts "--- repeat [expr {$rep + 1}]/$opt(repeats) ---"
+foreach cond [zvbench::rotated $conds $rep] {
+lassign $cond dist dims
         set key "zvrange:$dist:d$dims"
         zvbench::isolate_key $fd $key
         zvbench::run_batches $fd $N $B [list zvbench::zvadd_cmd $key $dims 0 $dist]
@@ -179,6 +188,9 @@ foreach dist $opt(dists) {
         zvbench::req $fd DEL zvrange:work
     }
 }
+
+zvbench::collapse_results
+zvbench::print_medians
 
 close $fd
 

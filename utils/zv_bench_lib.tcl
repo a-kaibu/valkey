@@ -250,6 +250,86 @@ namespace eval zvbench {
         set results {}
     }
 
+    # Rotated condition order for repeat r: spreads order effects
+    # (cache warmth, allocator state) evenly across conditions.
+    proc rotated {conds r} {
+        set n [llength $conds]
+        if {$n == 0} {return {}}
+        set o [expr {$r % $n}]
+        if {$o == 0} {return $conds}
+        return [concat [lrange $conds $o end] [lrange $conds 0 [expr {$o - 1}]]]
+    }
+
+    # Collapse per-repeat rows into median rows. Grouped by
+    # {dims dist op}; ops/p50/p99 take medians, min/max go to extra
+    # as rep_min/rep_max along with the repeat count. Preserves the
+    # first-seen condition order.
+    proc collapse_results {} {
+        variable results
+        array set g {}
+        set order {}
+        foreach r $results {
+            lassign $r dims dist op ops p50 p99 extra
+            set k "$dims\t$dist\t$op"
+            if {![info exists g($k,n)]} {
+                lappend order $k
+                set g($k,n) 0
+                set g($k,ops) {}
+                set g($k,p50) {}
+                set g($k,p99) {}
+                set g($k,extra) $extra
+                set g($k,dims) $dims
+                set g($k,dist) $dist
+                set g($k,op) $op
+            }
+            incr g($k,n)
+            lappend g($k,ops) $ops
+            if {$p50 ne ""} {lappend g($k,p50) $p50}
+            if {$p99 ne ""} {lappend g($k,p99) $p99}
+        }
+        set out {}
+        foreach k $order {
+            set ops [lsort -real $g($k,ops)]
+            set med [percentile $ops 0.50]
+            set extra $g($k,extra)
+            dict set extra rep_min [lindex $ops 0]
+            dict set extra rep_max [lindex $ops end]
+            dict set extra reps $g($k,n)
+            set p50 ""
+            set p99 ""
+            if {[llength $g($k,p50)] > 0} {
+                set p50 [percentile [lsort -real $g($k,p50)] 0.50]
+            }
+            if {[llength $g($k,p99)] > 0} {
+                set p99 [percentile [lsort -real $g($k,p99)] 0.50]
+            }
+            lappend out [list $g($k,dims) $g($k,dist) $g($k,op) $med $p50 $p99 $extra]
+        }
+        array unset g
+        set results $out
+    }
+
+    # Print the collapsed median table (call after collapse_results).
+    proc print_medians {} {
+        variable results
+        puts "--- medians over repeats (min..max) ---"
+        foreach r $results {
+            lassign $r dims dist op ops p50 p99 extra
+            set rng ""
+            if {[dict exists $extra rep_min]} {
+                set rng [format " (min %.0f, max %.0f, n=%s)" \
+                    [dict get $extra rep_min] [dict get $extra rep_max] [dict get $extra reps]]
+            }
+            if {$op eq "MEMORY-USAGE"} {
+                puts [format "%-8s dims=%-3s %-22s %10.0f bytes%s" $dist $dims $op $ops $rng]
+            } elseif {[string match "*-us" $op]} {
+                puts [format "%-8s dims=%-3s %-22s %10.1f us%s" $dist $dims $op $ops $rng]
+            } else {
+                puts [format "%-8s dims=%-3s %-22s %10.0f ops/sec%s" $dist $dims $op $ops $rng]
+            }
+        }
+    }
+
     # Row: {dims dist op ops p50 p99 extra-dict}.
     proc row {dims dist op ops p50 p99 {extra {}}} {
         variable results
