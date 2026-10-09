@@ -174,9 +174,10 @@ shared (workload B):
 - テスト系は継続: `ci.yml`, `external.yml`。
 - 新規 `.github/workflows/zv-poc.yml`:
   - `zv-test`: build + `unit/type/zvset` + `unit/type/zset` 回帰。
-  - `zv-bench`: `utils/zv_benchmark.tcl` 実行、TSV/txtをartifact化し
-    summaryに投稿。push時はN=20000のquick版、
-    workflow_dispatchでN指定 (default 1000000)。
+  - `zv-bench`: `utils/zv_benchmark.tcl` をフル条件
+    (N=1000000, dims 1/2/4/8/16, spread+shared) で実行。
+    push・workflow_dispatchのどちらでもフル計測し、
+    TSV/txtをartifact化しsummaryに投稿。
 
 ## PoC未対応項目
 

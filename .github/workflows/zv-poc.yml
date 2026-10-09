@@ -2,9 +2,8 @@ name: ZV PoC tests + benchmarks
 
 # Dedicated workflow for the ZV (vector sorted set) PoC branch.
 # - zv-test runs on every push: build + ZV tests + ZSET regression.
-# - zv-bench measures dims 1/2/4/8/16 throughput. On push it uses a
-#   small N for a quick sanity signal; use workflow_dispatch with
-#   n=1000000 for the full PoC numbers.
+# - zv-bench runs the full benchmark (N=1000000, dims 1/2/4/8/16,
+#   spread+shared) on push and on workflow_dispatch.
 
 on:
   push:
@@ -29,8 +28,8 @@ permissions:
   contents: read
 
 env:
-  BENCH_N: ${{ github.event.inputs.n || '20000' }}
-  BENCH_DIMS: ${{ github.event.inputs.dims || '1 2 4' }}
+  BENCH_N: ${{ github.event.inputs.n || '1000000' }}
+  BENCH_DIMS: ${{ github.event.inputs.dims || '1 2 4 8 16' }}
 
 jobs:
   zv-test:
@@ -50,7 +49,7 @@ jobs:
 
   zv-bench:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - name: Checkout Valkey
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
