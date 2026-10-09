@@ -22,7 +22,9 @@ on:
 
 concurrency:
   group: zv-poc-${{ github.head_ref || github.ref }}
-  cancel-in-progress: true
+  # Never cancel ZV runs: each push's test/bench results must survive
+  # newer pushes.
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -49,7 +51,8 @@ jobs:
 
   zv-bench:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    # GitHub-hosted max: 6h. Full bench (N=1M, all dims, both dists).
+    timeout-minutes: 360
     steps:
       - name: Checkout Valkey
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
