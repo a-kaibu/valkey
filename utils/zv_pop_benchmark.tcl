@@ -96,6 +96,20 @@ lassign $cond dist dims
         zvbench::row $dims $dist ZVMPOP-C100 [expr {100 / ($us / 1000000.0)}] "" ""
         zvbench::req $fd DEL ${key}:2
 
+        # Full-coverage distinct shuffle (count=N): O(N) transient rank
+        # array plus the full reply. Records time and peak memory delta.
+        reload_key $fd $key $N $dims $dist
+        set mem0 [zvbench::used_memory $fd]
+        set t0 [clock microseconds]
+        set got [zvbench::req $fd ZVRANDMEMBER $key $N]
+        set us [expr {[clock microseconds] - $t0}]
+        set mem1 [zvbench::used_memory $fd]
+        puts [format "%-8s dims=%-3s %-22s %10.0f ops/sec (%d members, mem-delta=%dKB)" \
+            $dist $dims RANDMEMBER-full [expr {$N / ($us / 1000000.0)}] [llength $got] \
+            [expr {($mem1 - $mem0) / 1024}]]
+        zvbench::row $dims $dist RANDMEMBER-full [expr {$N / ($us / 1000000.0)}] "" "" \
+            [dict create M $N memory_bytes [expr {$mem1 - $mem0}]]
+
         # Wake-up latency: blocked consumer + producer add.
         # Single-threaded measurement: send BZVPOPMIN (nonblocking fd),
         # flush producer ZVADD, then time the blocking read.

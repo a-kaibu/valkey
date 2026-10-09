@@ -3,6 +3,7 @@
 #include "sds.h"
 #include "hashtable.h"
 #include "fbtree.h"
+#include "mt19937-64.h"
 #include "rio.h"
 #include "zmalloc.h"
 
@@ -1260,6 +1261,19 @@ static void zvRankMapFree(hashtable *map) {
     hashtableRelease(map);
 }
 
+/* Uniform random integer in [0, n): full 64-bit MT19937 output (the same
+ * generator hashtable.c uses) with rejection sampling, so ranks stay
+ * uniform beyond RAND_MAX and small ranges have no modulo bias. */
+static unsigned long zvRandomBelow(unsigned long n) {
+    serverAssert(n > 0);
+    unsigned long long limit = ~0ULL - (~0ULL % n);
+    unsigned long long x;
+    do {
+        x = genrand64_int64();
+    } while (x >= limit);
+    return (unsigned long)(x % n);
+}
+
 /* Initial reply header mirroring addZpopInitialReply. */
 static void zvPopInitialReply(client *c, int emitkey, int use_nested_array, long rangelen, robj *key) {
     if (!use_nested_array && !emitkey) {
@@ -1554,7 +1568,7 @@ void zvrandmemberCommand(client *c) {
     }
 
     if (single) {
-        const_sds item = fbtreeGetAtRank(zs->tree, (unsigned long)rand() % len);
+        const_sds item = fbtreeGetAtRank(zs->tree, zvRandomBelow(len));
         serverAssert(item != NULL);
         size_t member_len;
         const char *member = zvItemMember(item, &member_len);
@@ -1576,7 +1590,7 @@ void zvrandmemberCommand(client *c) {
             ranks = zmalloc(sizeof(*ranks) * len);
             for (unsigned long i = 0; i < len; i++) ranks[i] = i;
             for (unsigned long i = 0; i < len; i++) {
-                unsigned long j = i + (unsigned long)rand() % (len - i);
+                unsigned long j = i + zvRandomBelow(len - i);
                 unsigned long tmp = ranks[i];
                 ranks[i] = ranks[j];
                 ranks[j] = tmp;
@@ -1584,7 +1598,7 @@ void zvrandmemberCommand(client *c) {
         }
         addReplyArrayLen(c, (withscores && c->resp <= 2) ? want * 2 : want);
         for (unsigned long i = 0; i < want; i++) {
-            unsigned long r = allow_dup ? (unsigned long)rand() % len : ranks[i];
+            unsigned long r = allow_dup ? zvRandomBelow(len) : ranks[i];
             const_sds item = fbtreeGetAtRank(zs->tree, r);
             serverAssert(item != NULL);
             size_t member_len;
@@ -1608,7 +1622,7 @@ void zvrandmemberCommand(client *c) {
     hashtable *map = hashtableCreate(&zvRankMapHashtableType);
     addReplyArrayLen(c, (withscores && c->resp <= 2) ? want * 2 : want);
     for (unsigned long i = 0; i < want; i++) {
-        unsigned long j = i + (unsigned long)rand() % (len - i);
+        unsigned long j = i + zvRandomBelow(len - i);
         unsigned long vi = zvRankMapGet(map, i, i);
         unsigned long vj = zvRankMapGet(map, j, j);
         zvRankMapSet(map, i, vj);
