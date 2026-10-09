@@ -553,7 +553,10 @@ start_server {tags {"zvset"}} {
         assert_equal {m0 m1 m2 m3} [r zvrange x 0 -1]
     }
 
-    test "ZV randomized correctness vs reference model" {        expr {srand(424242)}
+    test "ZV randomized correctness vs reference model" {
+        set seed 424242
+        puts "zv fuzz seed: $seed"
+        expr {srand($seed)}
         set key "zvrand"
         r del $key
         set ref {}
@@ -573,14 +576,35 @@ start_server {tags {"zvset"}} {
         r zvadd $key 1#10#1 c 1#2#3 b 1#2#1 a 0#999#0 d 2#0#5 e
         set ref [dict merge $ref {c {1 10 1} b {1 2 3} a {1 2 1} d {0 999 0} e {2 0 5}}]
         zv_check $key $ref
+        proc zv_in_range {v minv maxv} {
+            # lexicographic [minv,maxv] containment over doubles
+            set n [llength $v]
+            for {set i 0} {$i < $n} {incr i} {
+                set x [lindex $v $i]
+                set lo [lindex $minv $i]
+                if {$x < $lo} {return 0}
+                if {$x > $lo} {break}
+            }
+            for {set i 0} {$i < $n} {incr i} {
+                set x [lindex $v $i]
+                set hi [lindex $maxv $i]
+                if {$x > $hi} {return 0}
+                if {$x < $hi} {break}
+            }
+            return 1
+        }
+        proc randvec {dims} {
+            set v {}
+            for {set k 0} {$k < $dims} {incr k} {
+                lappend v [randscore]
+            }
+            return $v
+        }
         for {set step 0} {$step < 1500} {incr step} {
-            set op [expr {int(rand() * 10)}]
+            set op [expr {int(rand() * 14)}]
             if {$op < 6} {
                 set m [lindex $pool [expr {int(rand() * 200)}]]
-                set v {}
-                for {set k 0} {$k < $dims} {incr k} {
-                    lappend v [randscore]
-                }
+                set v [randvec $dims]
                 set scorestr [join $v "#"]
                 r zvadd $key $scorestr $m
                 # reference parses the same decimal strings
@@ -593,9 +617,71 @@ start_server {tags {"zvset"}} {
                 set m [lindex $pool [expr {int(rand() * 200)}]]
                 r zvrem $key $m
                 dict unset ref $m
+            } elseif {$op == 8} {
+                # bulk delete by rank slice
+                set size [dict size $ref]
+                if {$size > 0} {
+                    set start [expr {int(rand() * $size)}]
+                    set stop [expr {$start + int(rand() * 10)}]
+                    set victims [lrange [zv_expected $ref] $start $stop]
+                    r zvremrangebyrank $key $start $stop
+                    foreach victim $victims {
+                        dict unset ref [lindex $victim 0]
+                    }
+                }
+            } elseif {$op == 9} {
+                # bulk delete by inclusive score range
+                set minv {}
+                set maxv {}
+                foreach s [randvec $dims] {lappend minv [expr {double($s)}]}
+                foreach s [randvec $dims] {lappend maxv [expr {double($s)}]}
+                set smin [join $minv "#"]
+                set smax [join $maxv "#"]
+                # order bounds lexicographically so ranges are non-trivial
+                if {[zv_compare [list _ {*}$minv] [list _ {*}$maxv]] > 0} {
+                    set t $smin
+                    set smin $smax
+                    set smax $t
+                    set t $minv
+                    set minv $maxv
+                    set maxv $t
+                }
+                r zvremrangebyscore $key $smin $smax
+                dict for {m v} $ref {
+                    if {[zv_in_range $v $minv $maxv]} {
+                        dict unset ref $m
+                    }
+                }
+            } elseif {$op == 10} {
+                # pop the minimum
+                if {[dict size $ref] > 0} {
+                    set first [lindex [zv_expected $ref] 0]
+                    r zvpopmin $key
+                    dict unset ref [lindex $first 0]
+                }
+            } elseif {$op == 11} {
+                # copy round-trip
+                r copy $key ${key}:copy
+                zv_check ${key}:copy $ref
+                r del ${key}:copy
             }
             if {$step % 150 == 0} {
                 zv_check $key $ref
+                # spot-check COUNT against the reference
+                set minv {}
+                set maxv {}
+                foreach s [randvec $dims] {lappend minv [expr {double($s)}]}
+                foreach s [randvec $dims] {lappend maxv [expr {double($s)}]}
+                if {[zv_compare [list _ {*}$minv] [list _ {*}$maxv]] > 0} {
+                    set t $minv
+                    set minv $maxv
+                    set maxv $t
+                }
+                set want 0
+                dict for {m v} $ref {
+                    if {[zv_in_range $v $minv $maxv]} {incr want}
+                }
+                assert_equal $want [r zvcount $key [join $minv "#"] [join $maxv "#"]]
             }
         }
         zv_check $key $ref

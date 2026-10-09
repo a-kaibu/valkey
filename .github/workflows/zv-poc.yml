@@ -2,8 +2,10 @@ name: ZV PoC tests + benchmarks
 
 # Dedicated workflow for the ZV (vector sorted set) PoC branch.
 # - zv-test runs on every push: build + ZV tests + ZSET regression.
-# - zv-bench runs the full benchmark (N=1000000, dims 1/2/4/8/16,
-#   spread+shared) on push and on workflow_dispatch.
+# - zv-asan runs the ZV tests under AddressSanitizer.
+# - zv-bench runs the full basic benchmark (N=1000000, dims 1/2/4/8/16,
+#   spread+shared) on push and on workflow_dispatch. With bench=all it
+#   additionally runs the range/pop/setops/query benchmark scripts.
 
 on:
   push:
@@ -19,6 +21,14 @@ on:
         description: 'Dimensions to measure'
         required: false
         default: '1 2 4 8 16'
+      bench:
+        description: 'Benchmark set (basic or all scripts)'
+        required: false
+        default: 'basic'
+        type: choice
+        options:
+          - basic
+          - all
 
 concurrency:
   group: zv-poc-${{ github.head_ref || github.ref }}
@@ -32,6 +42,7 @@ permissions:
 env:
   BENCH_N: ${{ github.event.inputs.n || '1000000' }}
   BENCH_DIMS: ${{ github.event.inputs.dims || '1 2 4 8 16' }}
+  BENCH_SET: ${{ github.event.inputs.bench || 'basic' }}
 
 jobs:
   zv-test:
@@ -49,6 +60,19 @@ jobs:
       - name: ZSET regression tests
         run: ./runtest --single unit/type/zset --verbose --dump-logs
 
+  zv-asan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout Valkey
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build with AddressSanitizer
+        run: |
+          sudo apt-get install -y tcl8.6 tclx
+          make -j"$(nproc)" SANITIZER=address
+      - name: ZV tests under ASan
+        run: ./runtest --single unit/type/zvset --verbose --dump-logs
+
   zv-bench:
     runs-on: ubuntu-latest
     # GitHub-hosted max: 6h. Full bench (N=1M, all dims, both dists).
@@ -62,7 +86,15 @@ jobs:
         run: |
           ./src/valkey-server --port 7778 --daemonize yes --save '' --appendonly no --logfile /tmp/zv-bench.log
           sleep 1
-          tclsh utils/zv_benchmark.tcl --port 7778 --n "$BENCH_N" --dims "$BENCH_DIMS" --out /tmp/zv-bench.tsv | tee /tmp/zv-bench.txt
+          tclsh utils/zv_benchmark.tcl --port 7778 --n "$BENCH_N" --dims "$BENCH_DIMS" --out /tmp/zv-bench.tsv --json /tmp/zv-bench.jsonl | tee /tmp/zv-bench.txt
+          if [ "$BENCH_SET" = "all" ]; then
+            # Extended scripts run capped at N=100K to bound CI time.
+            if [ "$BENCH_N" -gt 100000 ]; then EXTRA_N=100000; else EXTRA_N="$BENCH_N"; fi
+            tclsh utils/zv_range_benchmark.tcl --port 7778 --n "$EXTRA_N" --out /tmp/zv-range-bench.tsv --json /tmp/zv-range-bench.jsonl | tee -a /tmp/zv-bench.txt
+            tclsh utils/zv_pop_benchmark.tcl --port 7778 --n "$EXTRA_N" --out /tmp/zv-pop-bench.tsv --json /tmp/zv-pop-bench.jsonl | tee -a /tmp/zv-bench.txt
+            tclsh utils/zv_setops_benchmark.tcl --port 7778 --n "$EXTRA_N" --out /tmp/zv-setops-bench.tsv --json /tmp/zv-setops-bench.jsonl | tee -a /tmp/zv-bench.txt
+            tclsh utils/zv_query_benchmark.tcl --port 7778 --n "$EXTRA_N" --out /tmp/zv-query-bench.tsv --json /tmp/zv-query-bench.jsonl | tee -a /tmp/zv-bench.txt
+          fi
           ./src/valkey-cli -p 7778 SHUTDOWN NOSAVE || true
       - name: Publish summary
         if: always()
@@ -77,8 +109,17 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: zv-bench-N${{ env.BENCH_N }}
+          name: zv-bench-N${{ env.BENCH_N }}-${{ env.BENCH_SET }}
           path: |
             /tmp/zv-bench.tsv
+            /tmp/zv-bench.jsonl
             /tmp/zv-bench.txt
+            /tmp/zv-range-bench.tsv
+            /tmp/zv-range-bench.jsonl
+            /tmp/zv-pop-bench.tsv
+            /tmp/zv-pop-bench.jsonl
+            /tmp/zv-setops-bench.tsv
+            /tmp/zv-setops-bench.jsonl
+            /tmp/zv-query-bench.tsv
+            /tmp/zv-query-bench.jsonl
           if-no-files-found: warn
