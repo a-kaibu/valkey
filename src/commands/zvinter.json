@@ -1,0 +1,111 @@
+{
+    "ZVINTER": {
+        "summary": "Returns the intersection of multiple ZVSETs.",
+        "complexity": "O(N*K)",
+        "group": "sorted_set",
+        "since": "9.2.0",
+        "command_flags": [
+            "WRITE",
+            "DENYOOM",
+            "FAST"
+        ],
+        "acl_categories": [
+            "FAST",
+            "SORTEDSET",
+            "WRITE"
+        ],
+        "arity": -3,
+        "function": "zvinterCommand",
+        "reply_schema": {
+            "type": "array"
+        },
+        "arguments": [
+            {
+                "name": "numkeys",
+                "type": "integer"
+            },
+            {
+                "name": "key",
+                "type": "key",
+                "key_spec_index": 0,
+                "multiple": true
+            },
+            {
+                "name": "weights",
+                "type": "block",
+                "optional": true,
+                "arguments": [
+                    {
+                        "name": "weight-token",
+                        "token": "WEIGHTS",
+                        "type": "pure-token"
+                    },
+                    {
+                        "name": "weight",
+                        "type": "double",
+                        "multiple": true
+                    }
+                ]
+            },
+            {
+                "name": "aggregate",
+                "type": "block",
+                "optional": true,
+                "arguments": [
+                    {
+                        "name": "aggregate-token",
+                        "token": "AGGREGATE",
+                        "type": "pure-token"
+                    },
+                    {
+                        "name": "op",
+                        "type": "oneof",
+                        "arguments": [
+                            {
+                                "name": "sum",
+                                "token": "SUM",
+                                "type": "pure-token"
+                            },
+                            {
+                                "name": "min",
+                                "token": "MIN",
+                                "type": "pure-token"
+                            },
+                            {
+                                "name": "max",
+                                "token": "MAX",
+                                "type": "pure-token"
+                            }
+                        ]
+                    }
+                ]
+            },
+            {
+                "name": "withscores",
+                "token": "WITHSCORES",
+                "type": "pure-token",
+                "optional": true
+            }
+        ],
+        "key_specs": [
+            {
+                "flags": [
+                    "RO",
+                    "ACCESS"
+                ],
+                "begin_search": {
+                    "index": {
+                        "pos": 1
+                    }
+                },
+                "find_keys": {
+                    "keynum": {
+                        "keynumidx": 0,
+                        "firstkey": 1,
+                        "step": 1
+                    }
+                }
+            }
+        ]
+    }
+}

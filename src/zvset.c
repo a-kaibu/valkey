@@ -445,6 +445,38 @@ static void zvsetItemToScore(const_sds item, zvScore *out) {
     }
 }
 
+void zvItemToScore(const_sds item, zvScore *out) {
+    zvsetItemToScore(item, out);
+}
+
+void zvScoreApplyWeight(zvScore *out, const zvScore *v, double weight) {
+    serverAssert(out->len == v->len);
+    for (int i = 0; i < v->len; i++) {
+        double x = v->values[i] * weight;
+        if (isnan(x)) x = 0;
+        if (x == 0.0) x = 0.0;
+        out->values[i] = x;
+    }
+}
+
+void zvScoreAggregate(zvScore *acc, const zvScore *weighted, int aggregate) {
+    serverAssert(acc->len == weighted->len);
+    if (aggregate == ZV_AGGR_SUM) {
+        for (int i = 0; i < acc->len; i++) {
+            double x = acc->values[i] + weighted->values[i];
+            if (isnan(x)) x = 0;
+            if (x == 0.0) x = 0.0;
+            acc->values[i] = x;
+        }
+        return;
+    }
+    int cmp = zvScoreCompare(weighted, acc);
+    int take_weighted = (aggregate == ZV_AGGR_MIN) ? (cmp < 0) : (cmp > 0);
+    if (take_weighted) {
+        for (int i = 0; i < acc->len; i++) acc->values[i] = weighted->values[i];
+    }
+}
+
 int zvsetAdd(zvset *zs, const zvScore *score, sds member, int in_flags, int *out_flags) {
     int nx = in_flags & ZVADD_IN_NX;
     int xx = in_flags & ZVADD_IN_XX;

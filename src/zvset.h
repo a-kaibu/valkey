@@ -66,6 +66,20 @@ int zvScoreCompare(const zvScore *a, const zvScore *b);
 int zvScoreIncrement(zvScore *result, const zvScore *base, const zvScore *delta);
 /* Format a parsed vector as "v0#v1#...". Caller must sdsfree(). */
 sds zvScoreFormat(const zvScore *score);
+/* Decode a packed item's full vector into out (len must match). */
+void zvItemToScore(const_sds item, zvScore *out);
+
+/* Set-operation aggregation modes. */
+#define ZV_AGGR_SUM 0
+#define ZV_AGGR_MIN 1
+#define ZV_AGGR_MAX 2
+
+/* Aggregate weighted into acc (same length). SUM adds component-wise;
+ * MIN/MAX pick the lexicographically smaller/larger whole vector.
+ * NaN components are normalized to 0 (setops never store NaN). */
+void zvScoreAggregate(zvScore *acc, const zvScore *weighted, int aggregate);
+/* weight*v per component with NaN->0 and -0 normalization. */
+void zvScoreApplyWeight(zvScore *out, const zvScore *v, double weight);
 
 /* BYSCORE bound: "-", "+", "(v0#v1" (exclusive) or "v0#v1" (inclusive). */
 typedef struct zvScoreBound {

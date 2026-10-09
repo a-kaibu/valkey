@@ -392,8 +392,7 @@ start_server {tags {"zvset"}} {
         assert_equal {} [r zvrandmember nokey 5]
     }
 
-    test "ZVSCAN cursor match count" {
-        zv_create q 1#1 ax 2#2 bx 3#3 cy
+    test "ZVSCAN cursor match count" {        zv_create q 1#1 ax 2#2 bx 3#3 cy
         set all {}
         set cursor 0
         while 1 {
@@ -614,5 +613,87 @@ start_server {tags {"zvset needs:debug"} overrides {appendonly yes aof-use-rdb-p
         assert_equal {100#16#1} [r zvscore ranking bob]
         assert_equal 2 [r zvrank ranking carol]
         assert_equal 3 [r zvcard ranking]
+    }
+}
+
+start_server {tags {"zvset-setops"}} {
+    proc zv_setup_setops {} {
+        r del a b u v w
+        r zvadd a 10#20 alice 20#0 bob 1#5 carol
+        r zvadd b 3#7 alice 30#0 bob 4#9 dave
+    }
+
+    test "ZVUNION SUM default" {
+        zv_setup_setops
+        assert_equal {carol dave alice bob} [r zvunion 2 a b]
+        assert_equal {carol 1#5 dave 4#9 alice 13#27 bob 50#0} [r zvunion 2 a b withscores]
+    }
+
+    test "ZVUNION MIN MAX are vector-wide" {
+        zv_setup_setops
+        # MIN picks whole vectors: alice=[3,7] (not [3,20]).
+        assert_equal {carol alice dave bob} [r zvunion 2 a b aggregate min]
+        assert_equal {carol 1#5 alice 3#7 dave 4#9 bob 20#0} [r zvunion 2 a b aggregate min withscores]
+        assert_equal {carol dave alice bob} [r zvunion 2 a b aggregate max]
+        assert_equal {carol 1#5 dave 4#9 alice 10#20 bob 30#0} [r zvunion 2 a b aggregate max withscores]
+    }
+
+    test "ZVUNION WEIGHTS" {
+        zv_setup_setops
+        assert_equal {carol dave alice bob} [r zvunion 2 a b weights 2 3]
+        assert_equal {carol 2#10 dave 12#27 alice 29#61 bob 130#0} [r zvunion 2 a b weights 2 3 withscores]
+        # negative weight
+        assert_equal {bob -20#0 alice -10#-20 carol -1#-5} [r zvunion 1 a weights -1 withscores]
+    }
+
+    test "ZVINTER SUM and missing keys" {
+        zv_setup_setops
+        assert_equal {alice bob} [r zvinter 2 a b]
+        assert_equal {alice 13#27 bob 50#0} [r zvinter 2 a b withscores]
+        # missing keys are empty sets: intersection is empty
+        assert_equal {} [r zvinter 3 a b nokey]
+        assert_equal {} [r zvinter 2 a nokey]
+        # duplicate input keys aggregate per input position (SUM doubles)
+        assert_equal {carol 2#10 alice 20#40 bob 40#0} [r zvinter 2 a a withscores]
+    }
+
+    test "ZVDIFF keeps first-key vectors" {
+        zv_setup_setops
+        assert_equal {carol} [r zvdiff 2 a b]
+        assert_equal {carol 1#5} [r zvdiff 2 a b withscores]
+        assert_equal {carol alice bob} [r zvdiff 2 a nokey]
+        assert_equal {} [r zvdiff 2 nokey a]
+    }
+
+    test "ZVINTERCARD with LIMIT" {
+        zv_setup_setops
+        assert_equal 2 [r zvintercard 2 a b]
+        assert_equal 1 [r zvintercard 2 a b limit 1]
+        assert_equal 0 [r zvintercard 2 a nokey]
+        assert_error "*negative*" {r zvintercard 2 a b limit -1}
+    }
+
+    test "ZVUNIONSTORE INTERSTORE DIFFSTORE" {
+        zv_setup_setops
+        assert_equal 4 [r zvunionstore u 2 a b]
+        assert_equal {carol dave alice bob} [r zvrange u 0 -1]
+        assert_equal 2 [r zvinterstore v 2 a b]
+        assert_equal {alice bob} [r zvrange v 0 -1]
+        assert_equal 1 [r zvdiffstore w 2 a b]
+        assert_equal {carol} [r zvrange w 0 -1]
+        # empty result deletes destination
+        r zvadd keep 1#1 z
+        assert_equal 0 [r zvinterstore keep 2 a nokey2]
+        assert_equal 0 [r exists keep]
+        # dst == src works (vectors doubled by self-union SUM)
+        assert_equal 3 [r zvunionstore a 1 a]
+        assert_equal {carol alice bob} [r zvrange a 0 -1]
+        # dimension mismatch
+        r zvadd dd 1#2#3 q
+        assert_error "*dimension*" {r zvunion 2 a dd}
+        assert_error "*dimension*" {r zvunionstore u2 2 a dd}
+        # wrong type
+        r set s str
+        assert_error "*WRONGTYPE*" {r zvunion 2 a s}
     }
 }

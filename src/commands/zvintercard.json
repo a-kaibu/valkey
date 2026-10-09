@@ -1,0 +1,61 @@
+{
+    "ZVINTERCARD": {
+        "summary": "Returns the cardinality of the intersection (with LIMIT).",
+        "complexity": "O(N*K)",
+        "group": "sorted_set",
+        "since": "9.2.0",
+        "command_flags": [
+            "WRITE",
+            "DENYOOM",
+            "FAST"
+        ],
+        "acl_categories": [
+            "FAST",
+            "SORTEDSET",
+            "WRITE"
+        ],
+        "arity": -3,
+        "function": "zvintercardCommand",
+        "reply_schema": {
+            "type": "integer"
+        },
+        "arguments": [
+            {
+                "name": "numkeys",
+                "type": "integer"
+            },
+            {
+                "name": "key",
+                "type": "key",
+                "key_spec_index": 0,
+                "multiple": true
+            },
+            {
+                "name": "limit",
+                "token": "LIMIT",
+                "type": "integer",
+                "optional": true
+            }
+        ],
+        "key_specs": [
+            {
+                "flags": [
+                    "RO",
+                    "ACCESS"
+                ],
+                "begin_search": {
+                    "index": {
+                        "pos": 1
+                    }
+                },
+                "find_keys": {
+                    "keynum": {
+                        "keynumidx": 0,
+                        "firstkey": 1,
+                        "step": 1
+                    }
+                }
+            }
+        ]
+    }
+}
