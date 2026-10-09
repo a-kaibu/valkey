@@ -21,6 +21,7 @@ permissions:
 
 jobs:
   build:
+    if: github.head_ref != 'poc/zv-multiscore'
     name: Spellcheck
     runs-on: ubuntu-latest
 

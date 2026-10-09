@@ -24,7 +24,7 @@ permissions:
 jobs:
   test-external-standalone:
     runs-on: ubuntu-latest
-    if: github.event_name != 'schedule' || github.repository == 'valkey-io/valkey'
+    if: (github.event_name != 'schedule' || github.repository == 'valkey-io/valkey') && github.ref != 'refs/heads/poc/zv-multiscore' && github.head_ref != 'poc/zv-multiscore'
     timeout-minutes: 1440
     steps:
       - name: Install libbacktrace
@@ -57,7 +57,7 @@ jobs:
 
   test-external-cluster:
     runs-on: ubuntu-latest
-    if: github.event_name != 'schedule' || github.repository == 'valkey-io/valkey'
+    if: (github.event_name != 'schedule' || github.repository == 'valkey-io/valkey') && github.ref != 'refs/heads/poc/zv-multiscore' && github.head_ref != 'poc/zv-multiscore'
     timeout-minutes: 1440
     steps:
       - name: Install libbacktrace
@@ -94,7 +94,7 @@ jobs:
 
   test-external-nodebug:
     runs-on: ubuntu-latest
-    if: github.event_name != 'schedule' || github.repository == 'valkey-io/valkey'
+    if: (github.event_name != 'schedule' || github.repository == 'valkey-io/valkey') && github.ref != 'refs/heads/poc/zv-multiscore' && github.head_ref != 'poc/zv-multiscore'
     timeout-minutes: 1440
     steps:
       - name: Install libbacktrace

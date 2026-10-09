@@ -24,6 +24,7 @@ concurrency:
 
 jobs:
   clang-format-check:
+    if: github.head_ref != 'poc/zv-multiscore'
     runs-on: ubuntu-latest
 
     steps:

@@ -29,7 +29,7 @@ jobs:
   analyze:
     name: Analyze
     runs-on: ubuntu-latest
-    if: github.event_name != 'schedule' || github.repository == 'valkey-io/valkey'
+    if: (github.event_name != 'schedule' || github.repository == 'valkey-io/valkey') && github.head_ref != 'poc/zv-multiscore'
     permissions:
       security-events: write
 

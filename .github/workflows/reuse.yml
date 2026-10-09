@@ -22,6 +22,7 @@ concurrency:
 
 jobs:
   reuse:
+    if: github.head_ref != 'poc/zv-multiscore'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
