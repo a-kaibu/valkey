@@ -319,6 +319,8 @@ static void zvRangeEmitClient(void *ctx, const_sds item) {
     zvRangeEmitCtx *ectx = ctx;
     size_t member_len;
     const char *member = zvItemMember(item, &member_len);
+    /* RESP3 nests [member, score] pairs like ZRANGE; RESP2 stays flat. */
+    if (ectx->withscores && ectx->c->resp > 2) addReplyArrayLen(ectx->c, 2);
     addReplyBulkCBuffer(ectx->c, member, member_len);
     if (ectx->withscores) {
         sds formatted = zvItemFormatScore(item);
@@ -347,7 +349,8 @@ static unsigned long zvRangeResultCount(unsigned long lo, unsigned long hi, int 
  * resolution must be done by the caller. */
 static void zvrangeReply(client *c, zvset *zs, unsigned long lo, unsigned long hi, int reverse, long offset, long count, int withscores) {
     unsigned long n = zvRangeResultCount(lo, hi, reverse, offset, count);
-    addReplyArrayLen(c, withscores ? n * 2 : n);
+    /* RESP3 nests [member, score] pairs like ZRANGE; RESP2 stays flat. */
+    addReplyArrayLen(c, (withscores && c->resp <= 2) ? n * 2 : n);
     if (n == 0) return;
     zvRangeEmitCtx ctx = {c, withscores};
     zvIterateRange(zs, lo, hi, reverse, offset, count, zvRangeEmitClient, &ctx);
@@ -360,6 +363,12 @@ static int zvBuildScoreInterval(zvScoreBound *minb, zvScoreBound *maxb, sds *low
     *lower = NULL;
     *upper = NULL;
     *empty = 0;
+    /* Reversed infinities ("+" as min or "-" as max) are empty, never
+     * a full range. */
+    if (minb->pos_inf || maxb->neg_inf) {
+        *empty = 1;
+        return 1;
+    }
     if (!minb->unbounded && !maxb->unbounded) {
         int cmp = zvScoreCompare(minb->score, maxb->score);
         if (cmp > 0 || (cmp == 0 && (minb->exclusive || maxb->exclusive))) {
@@ -714,6 +723,12 @@ static int zvBuildLexInterval(zvset *zs, zvLexBound *minb, zvLexBound *maxb, sds
     *lower = NULL;
     *upper = NULL;
     *empty = 0;
+    /* Reversed infinities ("+" as min or "-" as max) are empty, never
+     * a full range. */
+    if (minb->pos_inf || maxb->neg_inf) {
+        *empty = 1;
+        return C_OK;
+    }
     if (!minb->unbounded && !maxb->unbounded) {
         int cmp = zvLexMemberCompare(minb->member, sdslen(minb->member), maxb->member, sdslen(maxb->member));
         if (cmp > 0 || (cmp == 0 && (minb->exclusive || maxb->exclusive))) {
@@ -1504,6 +1519,12 @@ void zvrandmemberCommand(client *c) {
                 return;
             }
             withscores = 1;
+            /* Cap withscores counts like ZRANDMEMBER: want*2 must not
+             * wrap the RESP array length. */
+            if (count < -LONG_MAX / 2 || count > LONG_MAX / 2) {
+                addReplyError(c, "value is out of range");
+                return;
+            }
         }
     } else {
         addReplyErrorObject(c, shared.syntaxerr);
@@ -1521,6 +1542,14 @@ void zvrandmemberCommand(client *c) {
             addReplyNull(c);
         else
             addReplyArrayLen(c, 0);
+        return;
+    }
+
+    /* A magnitude of LONG_MIN cannot be served: its absolute value does
+     * not fit in the RESP array length (long). Reject it instead of
+     * wrapping to a negative length (or looping forever). */
+    if (!single && count == LONG_MIN) {
+        addReplyError(c, "value is out of range");
         return;
     }
 
@@ -1553,13 +1582,15 @@ void zvrandmemberCommand(client *c) {
                 ranks[j] = tmp;
             }
         }
-        addReplyArrayLen(c, withscores ? want * 2 : want);
+        addReplyArrayLen(c, (withscores && c->resp <= 2) ? want * 2 : want);
         for (unsigned long i = 0; i < want; i++) {
             unsigned long r = allow_dup ? (unsigned long)rand() % len : ranks[i];
             const_sds item = fbtreeGetAtRank(zs->tree, r);
             serverAssert(item != NULL);
             size_t member_len;
             const char *member = zvItemMember(item, &member_len);
+            /* RESP3 nests [member, score] pairs like ZRANDMEMBER. */
+            if (withscores && c->resp > 2) addReplyArrayLen(c, 2);
             addReplyBulkCBuffer(c, member, member_len);
             if (withscores) {
                 sds formatted = zvItemFormatScore(item);
@@ -1575,7 +1606,7 @@ void zvrandmemberCommand(client *c) {
      * swapping in a random later position j; the value moved into i (vj)
      * is emitted. */
     hashtable *map = hashtableCreate(&zvRankMapHashtableType);
-    addReplyArrayLen(c, withscores ? want * 2 : want);
+    addReplyArrayLen(c, (withscores && c->resp <= 2) ? want * 2 : want);
     for (unsigned long i = 0; i < want; i++) {
         unsigned long j = i + (unsigned long)rand() % (len - i);
         unsigned long vi = zvRankMapGet(map, i, i);
@@ -1586,6 +1617,8 @@ void zvrandmemberCommand(client *c) {
         serverAssert(item != NULL);
         size_t member_len;
         const char *member = zvItemMember(item, &member_len);
+        /* RESP3 nests [member, score] pairs like ZRANDMEMBER. */
+        if (withscores && c->resp > 2) addReplyArrayLen(c, 2);
         addReplyBulkCBuffer(c, member, member_len);
         if (withscores) {
             sds formatted = zvItemFormatScore(item);
@@ -1735,6 +1768,8 @@ void zvqueryCommand(client *c) {
         if (count >= 0 && emitted >= count) break;
         size_t member_len;
         const char *member = zvItemMember(item, &member_len);
+        /* RESP3 nests [member, score] pairs like ZRANGE; RESP2 stays flat. */
+        if (withscores && c->resp > 2) addReplyArrayLen(c, 2);
         addReplyBulkCBuffer(c, member, member_len);
         if (withscores) {
             sds formatted = zvItemFormatScore(item);
@@ -1742,7 +1777,7 @@ void zvqueryCommand(client *c) {
         }
         emitted++;
     }
-    setDeferredArrayLen(c, arraylen_ptr, withscores ? emitted * 2 : emitted);
+    setDeferredArrayLen(c, arraylen_ptr, (withscores && c->resp <= 2) ? emitted * 2 : emitted);
 }
 
 #define ZV_OP_UNION 0

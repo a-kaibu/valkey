@@ -133,9 +133,15 @@ sds zvScoreFormat(const zvScore *score) {
 int zvParseScoreBound(const char *str, size_t len, uint8_t dims, zvScoreBound *bound) {
     bound->unbounded = 0;
     bound->exclusive = 0;
+    bound->neg_inf = 0;
+    bound->pos_inf = 0;
     bound->score = NULL;
     if (len == 1 && (str[0] == '-' || str[0] == '+')) {
         bound->unbounded = 1;
+        if (str[0] == '-')
+            bound->neg_inf = 1;
+        else
+            bound->pos_inf = 1;
         return C_OK;
     }
     if (len > 1 && str[0] == '(') {
@@ -169,20 +175,23 @@ sds zvBuildScorePrefix(const zvScore *score) {
     return prefix;
 }
 
+/* Byte successor: increment the last non-0xFF byte and TRUNCATE
+ * everything after it. The result is the shortest string strictly
+ * greater than every string with the input as a prefix, so a carry
+ * never leaks into the comparison (e.g. "...00 FF" becomes "...01",
+ * which still sorts before "...01 00"). Operates purely on bytes;
+ * nothing is decoded. Returns NULL when the input is all 0xFF
+ * (unreachable for encoded score prefixes, since NaN is rejected). */
 sds zvBoundSuccessor(const_sds bound) {
     size_t len = sdslen(bound);
-    sds succ = sdsdup(bound);
     for (size_t i = len; i > 0; i--) {
-        unsigned char b = (unsigned char)succ[i - 1];
+        unsigned char b = (unsigned char)bound[i - 1];
         if (b != 0xFF) {
+            sds succ = sdsnewlen(bound, i);
             succ[i - 1] = (char)(b + 1);
             return succ;
         }
     }
-    /* All 0xFF: no successor in byte space. Unreachable for encoded
-     * score prefixes (NaN is rejected, dims <= 255 always leaves a
-     * non-0xFF byte via the dims byte or score encoding). */
-    sdsfree(succ);
     return NULL;
 }
 
@@ -244,9 +253,15 @@ void zvIterateRange(zvset *zs, unsigned long lo, unsigned long hi, int reverse, 
 int zvParseLexBound(const char *str, size_t len, zvLexBound *bound) {
     bound->unbounded = 0;
     bound->exclusive = 0;
+    bound->neg_inf = 0;
+    bound->pos_inf = 0;
     bound->member = NULL;
     if (len == 1 && (str[0] == '-' || str[0] == '+')) {
         bound->unbounded = 1;
+        if (str[0] == '-')
+            bound->neg_inf = 1;
+        else
+            bound->pos_inf = 1;
         return C_OK;
     }
     if (len >= 1 && (str[0] == '[' || str[0] == '(')) {

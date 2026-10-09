@@ -352,6 +352,29 @@ start_server {tags {"zvset"}} {
         assert_error "*invalid vector*" {r zvremrangebyscore x bad -}
     }
 
+    test "ZVREMRANGE reversed infinities delete nothing" {
+        zv_create x 1 a 2 b 3 c
+        assert_equal 0 [r zvremrangebyscore x + -]
+        assert_equal {a b c} [r zvrange x 0 -1]
+        assert_equal 3 [r zvcard x]
+        zv_create y 1#1 a 1#1 b 1#1 c
+        assert_equal 0 [r zvremrangebylex y + -]
+        assert_equal {a b c} [r zvrange y 0 -1]
+        # reads also treat reversed infinities as empty
+        assert_equal {} [r zvrange x + - byscore]
+        assert_equal 0 [r zvcount x + -]
+        assert_equal {} [r zvrange y + - bylex]
+    }
+
+    test "ZVRANGE adjacent-double boundaries" {
+        r del x
+        r zvadd x 1.0000000000000566 a 1.0000000000000568 b
+        assert_equal {a} [r zvrange x - 1.0000000000000566 byscore]
+        assert_equal {b} [r zvrange x (1.0000000000000566 +inf byscore]
+        assert_equal 1 [r zvcount x - 1.0000000000000566]
+        assert_equal {a} [r zvrange x -inf 1.0000000000000566 byscore]
+    }
+
     test "ZVREMRANGEBYLEX" {
         zv_create x 1#1 a 1#1 b 1#1 c 1#1 d
         assert_equal 2 [r zvremrangebylex x {[a} {[b}]
@@ -391,8 +414,7 @@ start_server {tags {"zvset"}} {
         assert_error "*syntax*" {r zvmpop 1 k1{zvm} badwhere}
     }
 
-    test "ZVRANDMEMBER" {
-        zv_create q 1#1 x 2#2 y 3#3 z
+    test "ZVRANDMEMBER" {        zv_create q 1#1 x 2#2 y 3#3 z
         # single returns a member
         set one [r zvrandmember q]
         assert {[lsearch -exact {x y z} $one] >= 0}
@@ -416,6 +438,30 @@ start_server {tags {"zvset"}} {
         assert_equal {x y z} [lsort [dict keys $seen]]
         assert_equal {} [r zvrandmember nokey]
         assert_equal {} [r zvrandmember nokey 5]
+    }
+
+    test "ZVRANDMEMBER extreme counts are rejected safely" {
+        zv_create q 1#1 x 2#2 y
+        assert_error "*out of range*" {r zvrandmember q -9223372036854775808 withscores}
+        assert_error "*out of range*" {r zvrandmember q 9223372036854775807 withscores}
+        assert_error "*out of range*" {r zvrandmember q -9223372036854775808}
+        # server still alive and data intact
+        assert_equal 2 [r zvcard q]
+        assert_equal {x y} [r zvrange q 0 -1]
+    }
+
+    test "ZV WITHSCORES nests pairs in RESP3" {
+        zv_create q 1#1 x 2#2 y
+        r hello 3
+        assert_equal {{{x 1#1} {y 2#2}}} [list [r zvrange q 0 -1 withscores]]
+        assert_equal {{{y 2#2} {x 1#1}}} [list [r zvrange q 0 -1 withscores rev]]
+        lassign [r zvrandmember q 2 withscores] p1 p2
+        assert_equal 2 [llength $p1]
+        assert_equal 2 [llength $p2]
+        assert_equal {{{x 1#1} {y 2#2}}} [list [lsort [r zvquery q filter 0 0 10 withscores]]]
+        r hello 2
+        # back to flat in RESP2
+        assert_equal {x 1#1 y 2#2} [r zvrange q 0 -1 withscores]
     }
 
     test "ZVSCAN cursor match count" {        zv_create q 1#1 ax 2#2 bx 3#3 cy

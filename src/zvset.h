@@ -81,10 +81,16 @@ void zvScoreAggregate(zvScore *acc, const zvScore *weighted, int aggregate);
 /* weight*v per component with NaN->0 and -0 normalization. */
 void zvScoreApplyWeight(zvScore *out, const zvScore *v, double weight);
 
-/* BYSCORE bound: "-", "+", "(v0#v1" (exclusive) or "v0#v1" (inclusive). */
+/* BYSCORE bound: "-", "+", "(v0#v1" (exclusive) or "v0#v1" (inclusive).
+ * A bare "-" is only valid as the lower bound (unbounded below) and a
+ * bare "+" only as the upper bound (unbounded above); the reverse means
+ * an empty range (never a full-range delete). The token side is recorded
+ * so reversed infinities stay empty instead of collapsing to NULL/NULL. */
 typedef struct zvScoreBound {
     int unbounded;
     int exclusive;
+    int neg_inf; /* "-" token */
+    int pos_inf; /* "+" token */
     zvScore *score; /* NULL when unbounded */
 } zvScoreBound;
 
@@ -102,10 +108,14 @@ sds zvBoundSuccessor(const_sds bound);
 /* Resolve half-open [lo,hi) ranks for [lower,upper); NULL = unbounded. */
 void zvScoreRanks(zvset *zs, const_sds lower, const_sds upper, unsigned long *lo, unsigned long *hi);
 
-/* BYLEX bound: "-", "+", "[member" (inclusive) or "(member" (exclusive). */
+/* BYLEX bound: "-", "+", "[member" (inclusive) or "(member" (exclusive).
+ * Directional infinities behave like score bounds: "+" as the lower
+ * bound or "-" as the upper bound means an empty range. */
 typedef struct zvLexBound {
     int unbounded;
     int exclusive;
+    int neg_inf;
+    int pos_inf;
     sds member; /* NULL when unbounded */
 } zvLexBound;
 
