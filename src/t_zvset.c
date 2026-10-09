@@ -555,22 +555,33 @@ void zvrangeCommand(client *c) {
     }
 }
 
-/* Rank core shared by ZVRANGE/ZVREVRANGE. */
-static void zvrangeRankCore(client *c, robj *zobj, long start, long stop, int reverse, int withscores) {
-    zvset *zs = objectGetVal(zobj);
-    unsigned long len = zvsetLength(zs);
-    /* Normalize negative indexes like ZRANGE. */
+/* Normalize [start,stop] rank bounds against len. With reverse, ranks
+ * count from the head of the reversed set, i.e. forward window
+ * [len-1-stop, len-start). */
+static void zvRankWindow(unsigned long len, long start, long stop, int reverse, unsigned long *lo,
+                         unsigned long *hi) {
     if (start < 0) start = (long)len + start;
     if (stop < 0) stop = (long)len + stop;
     if (start < 0) start = 0;
-    unsigned long lo, hi;
     if (stop < 0 || start > stop || start >= (long)len) {
-        lo = hi = 0;
-    } else {
-        if (stop >= (long)len) stop = (long)len - 1;
-        lo = (unsigned long)start;
-        hi = (unsigned long)stop + 1;
+        *lo = *hi = 0;
+        return;
     }
+    if (stop >= (long)len) stop = (long)len - 1;
+    if (!reverse) {
+        *lo = (unsigned long)start;
+        *hi = (unsigned long)stop + 1;
+    } else {
+        *lo = (unsigned long)((long)len - 1 - stop);
+        *hi = (unsigned long)((long)len - start);
+    }
+}
+
+/* Rank core shared by ZVRANGE/ZVREVRANGE. */
+static void zvrangeRankCore(client *c, robj *zobj, long start, long stop, int reverse, int withscores) {
+    zvset *zs = objectGetVal(zobj);
+    unsigned long lo, hi;
+    zvRankWindow(zvsetLength(zs), start, stop, reverse, &lo, &hi);
     zvrangeReply(c, zs, lo, hi, reverse, 0, -1, withscores);
 }
 
@@ -692,9 +703,13 @@ void zvrevrangebyscoreCommand(client *c) {
     zvrangebyscoreGenericCommand(c, 1);
 }
 
-/* Build [lower,upper) seek keys for uniform-vector BYLEX. Returns C_OK;
- * *empty is set when the range is trivially empty. The key must be
- * non-empty and uniform (checked by the caller). */
+/* Build [lower,upper) seek keys for uniform-vector BYLEX. Member bounds
+ * use a trailing NUL byte instead of a carry successor (which is only
+ * valid for fixed-length score prefixes): exclusive lower "a" seeks
+ * "a\0" (first strictly greater member, so "ab" is kept), while
+ * inclusive upper "a" ends exclusively at "a\0" (so "ab" is excluded).
+ * Returns C_OK; *empty is set when the range is trivially empty. The
+ * key must be non-empty and uniform (checked by the caller). */
 static int zvBuildLexInterval(zvset *zs, zvLexBound *minb, zvLexBound *maxb, sds *lower, sds *upper, int *empty) {
     *lower = NULL;
     *upper = NULL;
@@ -709,12 +724,7 @@ static int zvBuildLexInterval(zvset *zs, zvLexBound *minb, zvLexBound *maxb, sds
     if (!minb->unbounded) {
         sds key = zvLexSeekKey(zs, minb->member, sdslen(minb->member));
         if (minb->exclusive) {
-            *lower = zvBoundSuccessor(key);
-            sdsfree(key);
-            if (*lower == NULL) {
-                *empty = 1;
-                return C_OK;
-            }
+            *lower = sdscatlen(key, "\0", 1);
         } else {
             *lower = key;
         }
@@ -724,9 +734,7 @@ static int zvBuildLexInterval(zvset *zs, zvLexBound *minb, zvLexBound *maxb, sds
         if (maxb->exclusive) {
             *upper = key;
         } else {
-            *upper = zvBoundSuccessor(key);
-            sdsfree(key);
-            if (*upper == NULL) *upper = NULL; /* Covers everything above. */
+            *upper = sdscatlen(key, "\0", 1);
         }
     }
     return C_OK;
@@ -895,7 +903,7 @@ static void zvStoreCollectEmit(void *ctx, const_sds item) {
 void zvrangestoreCommand(client *c) {
     robj *dstkey = c->argv[1];
     robj *srckey = c->argv[2];
-    robj *srcobj, *dstobj;
+    robj *srcobj;
     zvRangeOpts o;
 
     if (c->argc < 5) {
@@ -934,27 +942,21 @@ void zvrangestoreCommand(client *c) {
 
     /* Missing source: delete destination, return 0 (like ZRANGESTORE). */
     if ((srcobj = lookupKeyWrite(c->db, srckey)) == NULL) {
-        if (lookupKeyWrite(c->db, dstkey) != NULL) dbDelete(c->db, dstkey);
+        if (dbDelete(c->db, dstkey)) {
+            signalModifiedKey(c, c->db, dstkey);
+            notifyKeyspaceEvent(NOTIFY_GENERIC, "del", dstkey, c->db->id);
+            server.dirty++;
+        }
         addReplyLongLong(c, 0);
         return;
     }
     if (checkType(c, srcobj, OBJ_ZVSET)) return;
-    dstobj = lookupKeyWrite(c->db, dstkey);
-    if (dstobj != NULL && checkType(c, dstobj, OBJ_ZVSET)) return;
+    /* NOTE: no type check on dstkey: STORE replaces any existing type. */
 
     zvset *src = objectGetVal(srcobj);
     unsigned long lo = 0, hi = 0;
     if (o.mode == 0) {
-        unsigned long len = zvsetLength(src);
-        long s = start, e = stop;
-        if (s < 0) s = (long)len + s;
-        if (e < 0) e = (long)len + e;
-        if (s < 0) s = 0;
-        if (!(e < 0 || s > e || s >= (long)len)) {
-            if (e >= (long)len) e = (long)len - 1;
-            lo = (unsigned long)s;
-            hi = (unsigned long)e + 1;
-        }
+        zvRankWindow(zvsetLength(src), start, stop, o.reverse, &lo, &hi);
     } else if (o.mode == 1) {
         zvScoreBound minb = {0}, maxb = {0};
         if (zvParseScoreBound(bound_min_raw, bound_min_len, src->dimensions, &minb) != C_OK ||
@@ -1002,8 +1004,8 @@ void zvrangestoreCommand(client *c) {
     zvIterateRange(src, lo, hi, o.reverse, lim_off, lim_cnt, zvStoreCollectEmit, &col);
 
     uint8_t dims = src->dimensions;
-    /* Replace wholesale, even on dimension change. */
-    if (lookupKeyWrite(c->db, dstkey) != NULL) dbDelete(c->db, dstkey);
+    /* Replace wholesale, even on dimension/type change (like ZRANGESTORE
+     * via setKey: any existing value is overwritten, TTL dropped). */
     if (col.len > 0) {
         robj *newobj = createZvsetObject(dims);
         zvset *newzs = objectGetVal(newobj);
@@ -1013,12 +1015,16 @@ void zvrangestoreCommand(client *c) {
             serverAssert(hashtableAdd(newzs->ht, inserted));
         }
         zfree(col.items);
-        dbAdd(c->db, dstkey, &newobj);
-        signalModifiedKey(c, c->db, dstkey);
+        setKey(c, c->db, dstkey, &newobj, 0);
         notifyKeyspaceEvent(NOTIFY_GENERIC, "zvrangestore", dstkey, c->db->id);
         server.dirty++;
     } else {
         zfree(col.items);
+        if (dbDelete(c->db, dstkey)) {
+            signalModifiedKey(c, c->db, dstkey);
+            notifyKeyspaceEvent(NOTIFY_GENERIC, "del", dstkey, c->db->id);
+            server.dirty++;
+        }
     }
     addReplyLongLong(c, (long long)col.len);
 }

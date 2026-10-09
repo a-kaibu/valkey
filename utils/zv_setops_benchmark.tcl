@@ -125,14 +125,16 @@ lassign $cond k overlap
             [dict create K $k overlap $overlap result $nres]
 
         lassign [time_cmd $fd ZVINTERCARD $k {*}$keys] us r
-        puts [format "K=%d ov=%-3d INTERCARD %8.1f ms res=%s" $k $overlap [expr {$us / 1000.0}] $r]
-        zvbench::row $dims spread INTERCARD [expr {$r / ($us / 1000000.0)}] "" "" \
-            [dict create K $k overlap $overlap result $r]
+        puts [format "K=%d ov=%-3d INTERCARD %8.1f ms res=%s (%.0f queries/sec)" \
+            $k $overlap [expr {$us / 1000.0}] $r [expr {1000000.0 / $us}]]
+        zvbench::row $dims spread INTERCARD [expr {1000000.0 / $us}] "" "" \
+            [dict create K $k overlap $overlap result $r elapsed_ms [expr {$us / 1000.0}]]
         foreach lim {10 100} {
             lassign [time_cmd $fd ZVINTERCARD $k {*}$keys LIMIT $lim] us r
-            puts [format "K=%d ov=%-3d INTERCARD-L$lim %8.1f ms res=%s" $k $overlap [expr {$us / 1000.0}] $r]
-            zvbench::row $dims spread INTERCARD-L$lim [expr {$r / ($us / 1000000.0)}] "" "" \
-                [dict create K $k overlap $overlap result $r]
+            puts [format "K=%d ov=%-3d INTERCARD-L$lim %8.1f ms res=%s (%.0f queries/sec)" \
+                $k $overlap $lim [expr {$us / 1000.0}] $r [expr {1000000.0 / $us}]]
+            zvbench::row $dims spread INTERCARD-L$lim [expr {1000000.0 / $us}] "" "" \
+                [dict create K $k overlap $overlap result $r elapsed_ms [expr {$us / 1000.0}]]
         }
 
         # STORE materialization.

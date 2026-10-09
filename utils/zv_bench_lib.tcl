@@ -261,16 +261,24 @@ namespace eval zvbench {
     }
 
     # Collapse per-repeat rows into median rows. Grouped by
-    # {dims dist op}; ops/p50/p99 take medians, min/max go to extra
-    # as rep_min/rep_max along with the repeat count. Preserves the
-    # first-seen condition order.
+    # {dims dist op} plus the stable condition keys in extra (K,
+    # overlap, M, ...); volatile keys (memory_bytes) are excluded so
+    # different workloads never merge into one median. ops/p50/p99 take
+    # medians, min/max go to extra as rep_min/rep_max with repeat count.
+    # Preserves the first-seen condition order.
     proc collapse_results {} {
         variable results
         array set g {}
         set order {}
         foreach r $results {
             lassign $r dims dist op ops p50 p99 extra
-            set k "$dims\t$dist\t$op"
+            set keyparts [list $dims $dist $op]
+            # Stable condition keys, sorted for determinism.
+            foreach k [lsort [dict keys $extra]] {
+                if {$k eq "memory_bytes"} continue
+                lappend keyparts $k [dict get $extra $k]
+            }
+            set k [join $keyparts "\t"]
             if {![info exists g($k,n)]} {
                 lappend order $k
                 set g($k,n) 0
@@ -349,7 +357,7 @@ namespace eval zvbench {
 
     # JSONL sidecar per benchmark-design: commit, command, operation,
     # dimensions, members, distribution, pipeline, connections, ops,
-    # latencies, memory.
+    # latencies, memory. Strictly one object per line.
     proc write_jsonl {path members pipeline conns} {
         variable results
         set sha [git_sha]
@@ -369,20 +377,22 @@ namespace eval zvbench {
                     if {$k ne "memory_bytes"} {dict set obj $k $v}
                 }
             }
-            puts $f "{"
             set parts {}
             dict for {k v} $obj {
                 if {$v eq ""} continue
                 if {[string is double -strict $v]} {
-                    lappend parts "  \"$k\": $v"
+                    lappend parts "\"$k\": $v"
                 } else {
-                    lappend parts "  \"$k\": \"$v\""
+                    lappend parts "\"$k\": \"[json_escape $v]\""
                 }
             }
-            puts $f [join $parts ",\n"]
-            puts $f "}"
+            puts $f "{[join $parts ", "]}"
         }
         close $f
         puts "wrote $path"
+    }
+
+    proc json_escape {s} {
+        return [string map {\\ \\\\ \" \\\" \n \\n \r \\r \t \\t} $s]
     }
 }

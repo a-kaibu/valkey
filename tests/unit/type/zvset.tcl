@@ -213,13 +213,16 @@ start_server {tags {"zvset"}} {
     }
 
     test "ZVRANGE REV and LIMIT" {
-        zv_create x 1 a 2 b 3 c 4 d
-        assert_equal {d c b a} [r zvrange x 0 -1 rev]
-        assert_equal {c b} [r zvrange x 1 2 rev]
+        zv_create x 1 a 2 b 3 c 4 d 5 e
+        assert_equal {e d c b a} [r zvrange x 0 -1 rev]
+        # REV ranks count from the head of the reversed set
+        assert_equal {e d} [r zvrange x 0 1 rev]
+        assert_equal {d c} [r zvrange x 1 2 rev]
+        assert_equal {a} [r zvrange x 4 4 rev]
         assert_equal {d c b a} [r zvrange x 4 1 byscore rev]
         assert_equal {c b} [r zvrange x 4 1 byscore rev limit 1 2]
         assert_equal {b c} [r zvrange x - + byscore limit 1 2]
-        assert_equal {b c d} [r zvrange x - + byscore limit 1 -1]
+        assert_equal {b c d e} [r zvrange x - + byscore limit 1 -1]
         assert_equal {} [r zvrange x - + byscore limit 0 0]
         assert_equal {} [r zvrange x - + byscore limit 10 5]
         assert_equal {a 1 b 2} [r zvrange x - + byscore limit 0 2 withscores]
@@ -239,8 +242,8 @@ start_server {tags {"zvset"}} {
 
     test "ZVREVRANGE and BYSCORE wrappers" {        zv_create x 1 a 2 b 3 c
         assert_equal {c b a} [r zvrevrange x 0 -1]
-        assert_equal {c b} [r zvrevrange x 1 2]
-        assert_equal {b 2 a 1} [r zvrevrange x 0 1 withscores]
+        assert_equal {b a} [r zvrevrange x 1 2]
+        assert_equal {c 3 b 2} [r zvrevrange x 0 1 withscores]
         zv_create y 1#0 a 1#1 b 2#0 c
         assert_equal {a b} [r zvrangebyscore y 1#0 1#1]
         assert_equal {b a} [r zvrevrangebyscore y 1#1 1#0]
@@ -260,6 +263,24 @@ start_server {tags {"zvset"}} {
         assert_equal {d c b} [r zvrevrangebylex u {[d} {[b}]
         assert_equal 2 [r zvlexcount u {[b} {(d}]
         assert_equal 4 [r zvlexcount u - +]
+    }
+
+    test "ZVRANGE BYLEX prefix-sharing members" {
+        zv_create u 1#1 a 1#1 ab 1#1 b
+        # exclusive lower must not skip "ab"
+        assert_equal {ab b} [r zvrange u {(a} + bylex]
+        assert_equal {ab b} [r zvrangebylex u {(a} +]
+        # inclusive upper must not include "ab"
+        assert_equal {a} [r zvrange u - {[a} bylex]
+        assert_equal 1 [r zvlexcount u - {[a}]
+        assert_equal {a ab} [r zvrange u - {(b} bylex]
+        assert_equal {ab b} [r zvrange u {[ab} + bylex]
+        # NUL byte member sorts between "a" and "ab"
+        set mnul "a\x00"
+        r zvadd u 1#1 $mnul
+        assert_equal [list a $mnul ab b] [r zvrange u - + bylex]
+        assert_equal [list $mnul ab b] [r zvrange u {(a} + bylex]
+        assert_equal [list a] [r zvrange u - {[a} bylex]
     }
 
     test "ZVRANGE BYLEX rejects mixed vectors" {
@@ -295,6 +316,11 @@ start_server {tags {"zvset"}} {
         r zvadd keep2{zvr} 1#1 z
         assert_equal 0 [r zvrangestore keep2{zvr} nosuchkey{zvr} 0 -1]
         assert_equal 0 [r exists keep2{zvr}]
+        # wrong-type destination is replaced, not an error
+        r set strdst{zvr} str
+        assert_equal 2 [r zvrangestore strdst{zvr} src{zvr} 0 1]
+        assert_equal {zvset} [r type strdst{zvr}]
+        assert_equal {b c} [r zvrange strdst{zvr} 0 -1]
         # dimension change replaces wholesale
         r zvadd other{zvr} 1#1#1 q
         assert_equal 2 [r zvrangestore other{zvr} src{zvr} 0 1]
