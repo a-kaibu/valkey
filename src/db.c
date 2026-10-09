@@ -31,6 +31,7 @@
 #include "listpack.h"
 #include "hotkeys.h"
 #include "ordered_index.h"
+#include "zvset.h"
 #include "cluster.h"
 #include "cluster_migrateslots.h"
 #include "latency.h"
@@ -1106,6 +1107,9 @@ void hashtableScanCallback(void *privdata, void *entry) {
     } else if (o->type == OBJ_ZSET) {
         orderedIndexItemGetElement((const OrderedIndexItem *)entry, &zset_ptr, &zset_ele_len);
         /* zset data is copied after filtering */
+    } else if (o->type == OBJ_ZVSET) {
+        zset_ptr = zvItemMember(entry, &zset_ele_len);
+        /* zvset data is copied after filtering */
     } else if (objectGetType(o) == OBJ_HASH) {
         key = entryGetField(entry);
         if (!data->only_keys) {
@@ -1117,16 +1121,25 @@ void hashtableScanCallback(void *privdata, void *entry) {
 
     /* Filter element if it does not match the pattern. */
     if (data->pattern) {
-        const char *match_ptr = (o->type == OBJ_ZSET) ? zset_ptr : key;
-        size_t match_len = (o->type == OBJ_ZSET) ? zset_ele_len : sdslen(key);
+        const char *match_ptr = (o->type == OBJ_ZSET || o->type == OBJ_ZVSET) ? zset_ptr : key;
+        size_t match_len = (o->type == OBJ_ZSET || o->type == OBJ_ZVSET) ? zset_ele_len : sdslen(key);
         if (!stringmatchlen(data->pattern, sdslen(data->pattern), match_ptr, match_len, 0)) {
             return;
         }
     }
 
-    /* zset data must be copied. Do this after filtering to avoid unneeded
-     * allocations. */
-    if (o->type == OBJ_ZSET) {
+    /* zset/zvset data must be copied. Do this after filtering to avoid
+     * unneeded allocations. */
+    if (o->type == OBJ_ZVSET) {
+        size_t ele_len;
+        const char *ptr = zvItemMember(entry, &ele_len);
+        key = sdsnewlen(ptr, ele_len);
+        if (!data->only_keys) {
+            sds tmp = zvItemFormatScore(entry);
+            val.buf = (const char *)tmp;
+            val.len = sdslen(tmp);
+        }
+    } else if (o->type == OBJ_ZSET) {
         /* zset data is copied */
         const char *ptr;
         size_t ele_len;
@@ -1272,8 +1285,9 @@ void scanGenericCommandWithOptions(client *c, robj *o, unsigned long long cursor
     vector result;
 
     /* Object must be NULL (to iterate keys names), or the type of the object
-     * must be Set, Sorted Set, or Hash. */
-    serverAssert(o == NULL || o->type == OBJ_SET || objectGetType(o) == OBJ_HASH || o->type == OBJ_ZSET);
+     * must be Set, Sorted Set, Hash or Vector Sorted Set. */
+    serverAssert(o == NULL || o->type == OBJ_SET || objectGetType(o) == OBJ_HASH || o->type == OBJ_ZSET ||
+                 o->type == OBJ_ZVSET);
 
     /* Iterate the collection.
      *
@@ -1301,6 +1315,11 @@ void scanGenericCommandWithOptions(client *c, robj *o, unsigned long long cursor
         zset *zs = objectGetVal(o);
         ht = zs->ht;
         /* scanning ZSET allocates temporary strings even though it's a dict */
+        free_callback = sdsfree;
+    } else if (o->type == OBJ_ZVSET && o->encoding == OBJ_ENCODING_BTREE) {
+        zvset *zs = objectGetVal(o);
+        ht = zs->ht;
+        /* scanning ZVSET allocates temporary strings even though it's a dict */
         free_callback = sdsfree;
     }
     vectorInit(&result, SCAN_VECTOR_INITIAL_ALLOC, sizeof(stringRef));

@@ -1,0 +1,64 @@
+{
+    "ZVSCAN": {
+        "summary": "Iterates members in a ZVSET with their vector scores.",
+        "complexity": "O(1) per call, O(N) for a full iteration.",
+        "group": "sorted_set",
+        "since": "9.2.0",
+        "arity": -3,
+        "function": "zvscanCommand",
+        "command_flags": [
+            "READONLY"
+        ],
+        "acl_categories": [
+            "READ",
+            "SORTEDSET",
+            "SLOW"
+        ],
+        "key_specs": [
+            {
+                "flags": [
+                    "RO",
+                    "ACCESS"
+                ],
+                "begin_search": {
+                    "index": {
+                        "pos": 1
+                    }
+                },
+                "find_keys": {
+                    "range": {
+                        "lastkey": 0,
+                        "step": 1,
+                        "limit": 0
+                    }
+                }
+            }
+        ],
+        "reply_schema": {
+            "type": "array"
+        },
+        "arguments": [
+            {
+                "name": "key",
+                "type": "key",
+                "key_spec_index": 0
+            },
+            {
+                "name": "cursor",
+                "type": "integer"
+            },
+            {
+                "name": "pattern",
+                "token": "MATCH",
+                "type": "pattern",
+                "optional": true
+            },
+            {
+                "name": "count",
+                "token": "COUNT",
+                "type": "integer",
+                "optional": true
+            }
+        ]
+    }
+}

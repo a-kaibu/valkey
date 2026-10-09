@@ -334,6 +334,89 @@ start_server {tags {"zvset"}} {
         assert_equal 0 [r exists x]
     }
 
+    test "ZVPOPMIN ZVPOPMAX" {
+        zv_create p 1#1 a 2#2 b 3#3 c
+        assert_equal {a 1#1} [r zvpopmin p]
+        assert_equal {c 3#3} [r zvpopmax p]
+        assert_equal {b 2#2} [r zvpopmin p]
+        assert_equal 0 [r exists p]
+        assert_equal {} [r zvpopmin p]
+        assert_equal {} [r zvpopmin nokey]
+        # count exceeds size, count 0
+        zv_create p 1 a 2 b
+        assert_equal {a 1 b 2} [r zvpopmin p 10]
+        assert_equal 0 [r exists p]
+        zv_create p 1 a 2 b
+        assert_equal {} [r zvpopmin p 0]
+        assert_equal 2 [r zvcard p]
+        # tie-break by member
+        zv_create p 1#1 c 1#1 a 1#1 b
+        assert_equal {a 1#1} [r zvpopmin p]
+        assert_equal {c 1#1} [r zvpopmax p]
+    }
+
+    test "ZVMPOP multi-key order" {
+        r del k1 k2
+        r zvadd k2 1#1 x 2#2 y
+        assert_equal {k2 {{x 1#1}}} [r zvmpop 2 k1 k2 min count 1]
+        assert_equal {k2 {{y 2#2}}} [r zvmpop 2 k1 k2 max]
+        assert_equal 0 [r exists k2]
+        assert_equal {} [r zvmpop 1 nokey min]
+        assert_error "*syntax*" {r zvmpop 1 k1 badwhere}
+    }
+
+    test "ZVRANDMEMBER" {
+        zv_create q 1#1 x 2#2 y 3#3 z
+        # single returns a member
+        set one [r zvrandmember q]
+        assert {[lsearch -exact {x y z} $one] >= 0}
+        # positive count: distinct
+        set got [r zvrandmember q 2]
+        assert_equal 2 [llength $got]
+        assert_equal 2 [llength [lsort -unique $got]]
+        # full count returns all shuffled
+        assert_equal {x y z} [lsort [r zvrandmember q 10]]
+        # negative count allows duplicates
+        set got [r zvrandmember q -10]
+        assert_equal 10 [llength $got]
+        # withscores flat pairs
+        set got [r zvrandmember q -2 withscores]
+        assert_equal 4 [llength $got]
+        # distribution sanity: every member appears over many draws
+        set seen {}
+        for {set i 0} {$i < 60} {incr i} {
+            dict incr seen [r zvrandmember q]
+        }
+        assert_equal {x y z} [lsort [dict keys $seen]]
+        assert_equal {} [r zvrandmember nokey]
+        assert_equal {} [r zvrandmember nokey 5]
+    }
+
+    test "ZVSCAN cursor match count" {
+        zv_create q 1#1 ax 2#2 bx 3#3 cy
+        set all {}
+        set cursor 0
+        while 1 {
+            lassign [r zvscan q $cursor] cursor items
+            foreach {m s} $items {
+                lappend all $m
+            }
+            if {$cursor == 0} break
+        }
+        assert_equal {ax bx cy} [lsort $all]
+        # match filters members
+        lassign [r zvscan q 0 match {*x}] cursor items
+        assert_equal 0 $cursor
+        set got {}
+        foreach {m s} $items { lappend got $m }
+        assert_equal {ax bx} [lsort $got]
+        # scores come along
+        lassign [r zvscan q 0 match cy] cursor items
+        assert_equal {cy 3#3} $items
+        assert_equal {0 {}} [r zvscan nokey 0]
+        assert_error "*invalid cursor*" {r zvscan q bad}
+    }
+
     test "ZVREM existing/missing/last item deletes key" {
         zv_create x 1 a 2 b
         assert_equal 1 [r zvrem x a]

@@ -1,0 +1,69 @@
+{
+    "ZVRANDMEMBER": {
+        "summary": "Returns random members in a ZVSET.",
+        "complexity": "O(1) single, O(N) distinct full scan worst case.",
+        "group": "sorted_set",
+        "since": "9.2.0",
+        "arity": -2,
+        "function": "zvrandmemberCommand",
+        "command_flags": [
+            "READONLY"
+        ],
+        "acl_categories": [
+            "READ",
+            "SORTEDSET",
+            "SLOW"
+        ],
+        "key_specs": [
+            {
+                "flags": [
+                    "RO",
+                    "ACCESS"
+                ],
+                "begin_search": {
+                    "index": {
+                        "pos": 1
+                    }
+                },
+                "find_keys": {
+                    "range": {
+                        "lastkey": 0,
+                        "step": 1,
+                        "limit": 0
+                    }
+                }
+            }
+        ],
+        "reply_schema": {
+            "oneOf": [
+                {
+                    "type": "array"
+                },
+                {
+                    "type": "string"
+                },
+                {
+                    "type": "null"
+                }
+            ]
+        },
+        "arguments": [
+            {
+                "name": "key",
+                "type": "key",
+                "key_spec_index": 0
+            },
+            {
+                "name": "count",
+                "type": "integer",
+                "optional": true
+            },
+            {
+                "name": "withscores",
+                "token": "WITHSCORES",
+                "type": "pure-token",
+                "optional": true
+            }
+        ]
+    }
+}

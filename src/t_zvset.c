@@ -1180,6 +1180,350 @@ void zvremrangebylexCommand(client *c) {
     zvremrangeFinish(c, key, zs, deleted, "zvremrangebylex");
 }
 
+#define ZVPOP_MIN 0
+#define ZVPOP_MAX 1
+
+/* Temporary rank->rank map for distinct random sampling (sparse
+ * Fisher-Yates). Entries are heap zvRankMapEntry structs freed by the
+ * entry destructor on release. */
+typedef struct zvRankMapEntry {
+    long k;
+    long v;
+} zvRankMapEntry;
+
+static uint64_t zvRankMapHash(const void *key) {
+    uint64_t x = (uint64_t)((const zvRankMapEntry *)key)->k + 0x9E3779B97F4A7C15ULL;
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+    return x ^ (x >> 31);
+}
+
+static int zvRankMapCmp(const void *a, const void *b) {
+    return ((const zvRankMapEntry *)a)->k == ((const zvRankMapEntry *)b)->k;
+}
+
+static void zvRankMapDestructor(void *entry) {
+    zfree(entry);
+}
+
+static hashtableType zvRankMapHashtableType = {
+    .hashFunction = zvRankMapHash,
+    .keyCompare = zvRankMapCmp,
+    .entryDestructor = zvRankMapDestructor,
+};
+
+static unsigned long zvRankMapGet(hashtable *map, unsigned long k, unsigned long def) {
+    zvRankMapEntry probe;
+    probe.k = (long)k;
+    probe.v = 0;
+    void *found = NULL;
+    if (hashtableFind(map, &probe, &found)) return (unsigned long)((zvRankMapEntry *)found)->v;
+    return def;
+}
+
+static void zvRankMapSet(hashtable *map, unsigned long k, unsigned long v) {
+    zvRankMapEntry probe;
+    probe.k = (long)k;
+    probe.v = 0;
+    void **ref = hashtableFindRef(map, &probe);
+    if (ref != NULL) {
+        ((zvRankMapEntry *)*ref)->v = (long)v;
+        return;
+    }
+    zvRankMapEntry *e = zmalloc(sizeof(*e));
+    e->k = (long)k;
+    e->v = (long)v;
+    serverAssert(hashtableAdd(map, e));
+}
+
+static void zvRankMapFree(hashtable *map) {
+    hashtableRelease(map);
+}
+
+/* Initial reply header mirroring addZpopInitialReply. */
+static void zvPopInitialReply(client *c, int emitkey, int use_nested_array, long rangelen, robj *key) {
+    if (!use_nested_array && !emitkey) {
+        addReplyArrayLen(c, rangelen * 2);
+    } else if (use_nested_array && !emitkey) {
+        addReplyArrayLen(c, rangelen);
+    } else if (!use_nested_array && emitkey) {
+        addReplyArrayLen(c, rangelen * 2 + 1);
+        addReplyBulk(c, key);
+    } else {
+        addReplyArrayLen(c, 2);
+        addReplyBulk(c, key);
+        addReplyArrayLen(c, rangelen);
+    }
+}
+
+/* Generic pop used by ZVPOPMIN/ZVPOPMAX/ZVMPOP (and Phase 6 blocking).
+ * fbtreePopMin/Max transfer item ownership to us; the hashtable
+ * reference is dropped while the item is alive, then it is freed. */
+void genericZvpopCommand(client *c,
+                         robj **keyv,
+                         int keyc,
+                         int where,
+                         int emitkey,
+                         long count,
+                         int use_nested_array,
+                         int reply_nil_when_empty,
+                         int *deleted) {
+    int idx;
+    robj *key = NULL;
+    robj *zobj = NULL;
+
+    if (deleted) *deleted = 0;
+
+    /* First existing key wins; wrong type aborts. */
+    idx = 0;
+    while (idx < keyc) {
+        key = keyv[idx++];
+        zobj = lookupKeyWrite(c->db, key);
+        if (!zobj) continue;
+        if (checkType(c, zobj, OBJ_ZVSET)) return;
+        break;
+    }
+
+    if (!zobj) {
+        if (reply_nil_when_empty) {
+            addReplyNullArray(c);
+        } else {
+            addReply(c, shared.emptyarray);
+        }
+        return;
+    }
+
+    if (count == 0) {
+        addReply(c, shared.emptyarray);
+        return;
+    }
+    if (count == -1) count = 1;
+
+    zvset *zs = objectGetVal(zobj);
+    long llen = (long)zvsetLength(zs);
+    long rangelen = (count > llen) ? llen : count;
+    long result_count = 0;
+
+    hashtablePauseAutoShrink(zs->ht);
+    do {
+        sds item = (where == ZVPOP_MAX) ? fbtreePopMax(zs->tree) : fbtreePopMin(zs->tree);
+        serverAssertWithInfo(c, zobj, item != NULL);
+        size_t member_len;
+        const char *member = zvItemMember(item, &member_len);
+        sds score = zvItemFormatScore(item);
+        /* Drop the hashtable reference while the item is alive. */
+        serverAssert(hashtableDelete(zs->ht, item));
+        server.dirty++;
+
+        if (result_count == 0) {
+            char *events[2] = {"zvpopmin", "zvpopmax"};
+            notifyKeyspaceEvent(NOTIFY_GENERIC, events[where], key, c->db->id);
+            zvPopInitialReply(c, emitkey, use_nested_array, rangelen, key);
+        }
+
+        if (use_nested_array) addReplyArrayLen(c, 2);
+        addReplyBulkCBuffer(c, member, member_len);
+        addReplyBulkSds(c, score);
+        sdsfree(item);
+        ++result_count;
+    } while (--rangelen);
+
+    if (zvsetLength(zs) == 0) {
+        if (deleted) *deleted = 1;
+        dbDelete(c->db, key);
+        notifyKeyspaceEvent(NOTIFY_GENERIC, "del", key, c->db->id);
+    } else {
+        hashtableResumeAutoShrink(zs->ht);
+    }
+    signalModifiedKey(c, c->db, key);
+
+    if (c->cmd->proc == zvmpopCommand) {
+        /* Replicate as ZVPOPMIN/ZVPOPMAX with COUNT. */
+        robj *popcmd = createStringObject(where == ZVPOP_MAX ? "ZVPOPMAX" : "ZVPOPMIN", 8);
+        robj *count_obj = createStringObjectFromLongLong((count > llen) ? llen : count);
+        rewriteClientCommandVector(c, 3, popcmd, key, count_obj);
+        decrRefCount(popcmd);
+        decrRefCount(count_obj);
+    }
+}
+
+void zvpopMinMaxCommand(client *c, int where) {
+    if (c->argc > 3) {
+        addReplyErrorObject(c, shared.syntaxerr);
+        return;
+    }
+
+    long count = -1; /* -1 for plain single pop. */
+    if (c->argc == 3 && getPositiveLongFromObjectOrReply(c, c->argv[2], &count, NULL) != C_OK) return;
+
+    /* Flat array in RESP2 or for single pops; nested in RESP3 with COUNT. */
+    int use_nested_array = (c->resp > 2 && count != -1);
+
+    genericZvpopCommand(c, &c->argv[1], 1, where, 0, count, use_nested_array, 0, NULL);
+}
+
+void zvpopminCommand(client *c) {
+    zvpopMinMaxCommand(c, ZVPOP_MIN);
+}
+
+void zvpopmaxCommand(client *c) {
+    zvpopMinMaxCommand(c, ZVPOP_MAX);
+}
+
+void zvmpopCommand(client *c) {
+    long j, numkeys = 0;
+    int where = -1;
+
+    if (getRangeLongFromObjectOrReply(c, c->argv[1], 1, LONG_MAX, &numkeys, "numkeys should be greater than 0") !=
+        C_OK)
+        return;
+
+    if (numkeys > c->argc - 3) {
+        addReplyError(c, "numkeys should be less than the number of arguments");
+        return;
+    }
+
+    long where_idx = 1 + numkeys + 1;
+    if (where_idx >= c->argc || (strcasecmp(objectGetVal(c->argv[where_idx]), "min") &&
+                                 strcasecmp(objectGetVal(c->argv[where_idx]), "max"))) {
+        addReplyErrorObject(c, shared.syntaxerr);
+        return;
+    }
+    where = !strcasecmp(objectGetVal(c->argv[where_idx]), "max") ? ZVPOP_MAX : ZVPOP_MIN;
+
+    long count = 1;
+    for (j = where_idx + 1; j < c->argc; j++) {
+        char *opt = objectGetVal(c->argv[j]);
+        int moreargs = (c->argc - 1) - j;
+        if (!strcasecmp(opt, "count") && moreargs) {
+            j++;
+            if (getPositiveLongFromObjectOrReply(c, c->argv[j], &count, NULL) != C_OK) return;
+        } else {
+            addReplyErrorObject(c, shared.syntaxerr);
+            return;
+        }
+    }
+
+    genericZvpopCommand(c, c->argv + 2, (int)numkeys, where, 1, count, 1, 1, NULL);
+}
+
+void zvrandmemberCommand(client *c) {
+    robj *key = c->argv[1];
+    robj *zobj;
+    long count = 0;
+    int withscores = 0;
+    int single = 0;
+
+    if (c->argc == 2) {
+        single = 1;
+    } else if (c->argc <= 4) {
+        if (getLongFromObjectOrReply(c, c->argv[2], &count, NULL) != C_OK) return;
+        if (c->argc == 4) {
+            if (strcasecmp(objectGetVal(c->argv[3]), "withscores")) {
+                addReplyErrorObject(c, shared.syntaxerr);
+                return;
+            }
+            withscores = 1;
+        }
+    } else {
+        addReplyErrorObject(c, shared.syntaxerr);
+        return;
+    }
+
+    if ((zobj = lookupKeyReadOrReply(c, key, single ? shared.null[c->resp] : shared.emptyarray)) == NULL ||
+        checkType(c, zobj, OBJ_ZVSET))
+        return;
+
+    zvset *zs = objectGetVal(zobj);
+    unsigned long len = zvsetLength(zs);
+    if (len == 0) {
+        if (single)
+            addReplyNull(c);
+        else
+            addReplyArrayLen(c, 0);
+        return;
+    }
+
+    if (single) {
+        const_sds item = fbtreeGetAtRank(zs->tree, (unsigned long)rand() % len);
+        serverAssert(item != NULL);
+        size_t member_len;
+        const char *member = zvItemMember(item, &member_len);
+        addReplyBulkCBuffer(c, member, member_len);
+        return;
+    }
+
+    int allow_dup = count < 0;
+    unsigned long want = allow_dup ? (unsigned long)(-(count + 1)) + 1 : (unsigned long)count;
+    if (!allow_dup && want >= len) {
+        /* Return everything in shuffled order. */
+        want = len;
+    }
+
+    if (allow_dup || want >= len) {
+        /* Duplicates allowed, or full-set shuffle. */
+        unsigned long *ranks = NULL;
+        if (!allow_dup) {
+            ranks = zmalloc(sizeof(*ranks) * len);
+            for (unsigned long i = 0; i < len; i++) ranks[i] = i;
+            for (unsigned long i = 0; i < len; i++) {
+                unsigned long j = i + (unsigned long)rand() % (len - i);
+                unsigned long tmp = ranks[i];
+                ranks[i] = ranks[j];
+                ranks[j] = tmp;
+            }
+        }
+        addReplyArrayLen(c, withscores ? want * 2 : want);
+        for (unsigned long i = 0; i < want; i++) {
+            unsigned long r = allow_dup ? (unsigned long)rand() % len : ranks[i];
+            const_sds item = fbtreeGetAtRank(zs->tree, r);
+            serverAssert(item != NULL);
+            size_t member_len;
+            const char *member = zvItemMember(item, &member_len);
+            addReplyBulkCBuffer(c, member, member_len);
+            if (withscores) {
+                sds formatted = zvItemFormatScore(item);
+                addReplyBulkSds(c, formatted);
+            }
+        }
+        zfree(ranks);
+        return;
+    }
+
+    /* Distinct partial sample: sparse Fisher-Yates with a temporary
+     * rank->rank map backed by a small hashtable. Position i is fixed by
+     * swapping in a random later position j; the value moved into i (vj)
+     * is emitted. */
+    hashtable *map = hashtableCreate(&zvRankMapHashtableType);
+    addReplyArrayLen(c, withscores ? want * 2 : want);
+    for (unsigned long i = 0; i < want; i++) {
+        unsigned long j = i + (unsigned long)rand() % (len - i);
+        unsigned long vi = zvRankMapGet(map, i, i);
+        unsigned long vj = zvRankMapGet(map, j, j);
+        zvRankMapSet(map, i, vj);
+        zvRankMapSet(map, j, vi);
+        const_sds item = fbtreeGetAtRank(zs->tree, vj);
+        serverAssert(item != NULL);
+        size_t member_len;
+        const char *member = zvItemMember(item, &member_len);
+        addReplyBulkCBuffer(c, member, member_len);
+        if (withscores) {
+            sds formatted = zvItemFormatScore(item);
+            addReplyBulkSds(c, formatted);
+        }
+    }
+    zvRankMapFree(map);
+}
+
+void zvscanCommand(client *c) {
+    robj *o;
+    unsigned long long cursor;
+
+    if (parseScanCursorOrReply(c, objectGetVal(c->argv[2]), &cursor) == C_ERR) return;
+    if ((o = lookupKeyReadOrReply(c, c->argv[1], shared.emptyscan)) == NULL || checkType(c, o, OBJ_ZVSET)) return;
+    scanGenericCommand(c, o, cursor);
+}
+
 void zvcountCommand(client *c) {
     robj *key = c->argv[1];
     robj *zobj;

@@ -11076,6 +11076,39 @@ struct COMMAND_ARG ZVLEXCOUNT_Args[] = {
 {MAKE_ARG("max",ARG_TYPE_STRING,-1,NULL,NULL,NULL,CMD_ARG_NONE,0,NULL)},
 };
 
+/********** ZVMPOP ********************/
+
+#ifndef SKIP_CMD_HISTORY_TABLE
+/* ZVMPOP history */
+#define ZVMPOP_History NULL
+#endif
+
+#ifndef SKIP_CMD_TIPS_TABLE
+/* ZVMPOP tips */
+#define ZVMPOP_Tips NULL
+#endif
+
+#ifndef SKIP_CMD_KEY_SPECS_TABLE
+/* ZVMPOP key specs */
+keySpec ZVMPOP_Keyspecs[1] = {
+{NULL,CMD_KEY_RW|CMD_KEY_DELETE,KSPEC_BS_INDEX,.bs.index={2},KSPEC_FK_KEYNUM,.fk.keynum={0,1,1}}
+};
+#endif
+
+/* ZVMPOP where argument table */
+struct COMMAND_ARG ZVMPOP_where_Subargs[] = {
+{MAKE_ARG("min",ARG_TYPE_PURE_TOKEN,-1,"MIN",NULL,NULL,CMD_ARG_NONE,0,NULL)},
+{MAKE_ARG("max",ARG_TYPE_PURE_TOKEN,-1,"MAX",NULL,NULL,CMD_ARG_NONE,0,NULL)},
+};
+
+/* ZVMPOP argument table */
+struct COMMAND_ARG ZVMPOP_Args[] = {
+{MAKE_ARG("numkeys",ARG_TYPE_INTEGER,-1,NULL,NULL,NULL,CMD_ARG_NONE,0,NULL)},
+{MAKE_ARG("key",ARG_TYPE_KEY,0,NULL,NULL,NULL,CMD_ARG_MULTIPLE,0,NULL)},
+{MAKE_ARG("where",ARG_TYPE_ONEOF,-1,NULL,NULL,NULL,CMD_ARG_NONE,2,NULL),.subargs=ZVMPOP_where_Subargs},
+{MAKE_ARG("count",ARG_TYPE_INTEGER,-1,"COUNT",NULL,NULL,CMD_ARG_OPTIONAL,0,NULL)},
+};
+
 /********** ZVMSCORE ********************/
 
 #ifndef SKIP_CMD_HISTORY_TABLE
@@ -11099,6 +11132,82 @@ keySpec ZVMSCORE_Keyspecs[1] = {
 struct COMMAND_ARG ZVMSCORE_Args[] = {
 {MAKE_ARG("key",ARG_TYPE_KEY,0,NULL,NULL,NULL,CMD_ARG_NONE,0,NULL)},
 {MAKE_ARG("member",ARG_TYPE_STRING,-1,NULL,NULL,NULL,CMD_ARG_MULTIPLE,0,NULL)},
+};
+
+/********** ZVPOPMAX ********************/
+
+#ifndef SKIP_CMD_HISTORY_TABLE
+/* ZVPOPMAX history */
+#define ZVPOPMAX_History NULL
+#endif
+
+#ifndef SKIP_CMD_TIPS_TABLE
+/* ZVPOPMAX tips */
+#define ZVPOPMAX_Tips NULL
+#endif
+
+#ifndef SKIP_CMD_KEY_SPECS_TABLE
+/* ZVPOPMAX key specs */
+keySpec ZVPOPMAX_Keyspecs[1] = {
+{NULL,CMD_KEY_RW|CMD_KEY_DELETE,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}
+};
+#endif
+
+/* ZVPOPMAX argument table */
+struct COMMAND_ARG ZVPOPMAX_Args[] = {
+{MAKE_ARG("key",ARG_TYPE_KEY,0,NULL,NULL,NULL,CMD_ARG_NONE,0,NULL)},
+{MAKE_ARG("count",ARG_TYPE_INTEGER,-1,NULL,NULL,NULL,CMD_ARG_OPTIONAL,0,NULL)},
+};
+
+/********** ZVPOPMIN ********************/
+
+#ifndef SKIP_CMD_HISTORY_TABLE
+/* ZVPOPMIN history */
+#define ZVPOPMIN_History NULL
+#endif
+
+#ifndef SKIP_CMD_TIPS_TABLE
+/* ZVPOPMIN tips */
+#define ZVPOPMIN_Tips NULL
+#endif
+
+#ifndef SKIP_CMD_KEY_SPECS_TABLE
+/* ZVPOPMIN key specs */
+keySpec ZVPOPMIN_Keyspecs[1] = {
+{NULL,CMD_KEY_RW|CMD_KEY_DELETE,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}
+};
+#endif
+
+/* ZVPOPMIN argument table */
+struct COMMAND_ARG ZVPOPMIN_Args[] = {
+{MAKE_ARG("key",ARG_TYPE_KEY,0,NULL,NULL,NULL,CMD_ARG_NONE,0,NULL)},
+{MAKE_ARG("count",ARG_TYPE_INTEGER,-1,NULL,NULL,NULL,CMD_ARG_OPTIONAL,0,NULL)},
+};
+
+/********** ZVRANDMEMBER ********************/
+
+#ifndef SKIP_CMD_HISTORY_TABLE
+/* ZVRANDMEMBER history */
+#define ZVRANDMEMBER_History NULL
+#endif
+
+#ifndef SKIP_CMD_TIPS_TABLE
+/* ZVRANDMEMBER tips */
+#define ZVRANDMEMBER_Tips NULL
+#endif
+
+#ifndef SKIP_CMD_KEY_SPECS_TABLE
+/* ZVRANDMEMBER key specs */
+keySpec ZVRANDMEMBER_Keyspecs[1] = {
+{NULL,CMD_KEY_RO|CMD_KEY_ACCESS,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}
+};
+#endif
+
+/* ZVRANDMEMBER argument table */
+struct COMMAND_ARG ZVRANDMEMBER_Args[] = {
+{MAKE_ARG("key",ARG_TYPE_KEY,0,NULL,NULL,NULL,CMD_ARG_NONE,0,NULL)},
+{MAKE_ARG("count",ARG_TYPE_INTEGER,-1,NULL,NULL,NULL,CMD_ARG_OPTIONAL,0,NULL)},
+{MAKE_ARG("withscores",ARG_TYPE_PURE_TOKEN,-1,"WITHSCORES",NULL,NULL,CMD_ARG_OPTIONAL,0,NULL)},
 };
 
 /********** ZVRANGE ********************/
@@ -11505,6 +11614,33 @@ struct COMMAND_ARG ZVREVRANK_Args[] = {
 {MAKE_ARG("key",ARG_TYPE_KEY,0,NULL,NULL,NULL,CMD_ARG_NONE,0,NULL)},
 {MAKE_ARG("member",ARG_TYPE_STRING,-1,NULL,NULL,NULL,CMD_ARG_NONE,0,NULL)},
 {MAKE_ARG("withscore",ARG_TYPE_PURE_TOKEN,-1,"WITHSCORE",NULL,NULL,CMD_ARG_OPTIONAL,0,NULL)},
+};
+
+/********** ZVSCAN ********************/
+
+#ifndef SKIP_CMD_HISTORY_TABLE
+/* ZVSCAN history */
+#define ZVSCAN_History NULL
+#endif
+
+#ifndef SKIP_CMD_TIPS_TABLE
+/* ZVSCAN tips */
+#define ZVSCAN_Tips NULL
+#endif
+
+#ifndef SKIP_CMD_KEY_SPECS_TABLE
+/* ZVSCAN key specs */
+keySpec ZVSCAN_Keyspecs[1] = {
+{NULL,CMD_KEY_RO|CMD_KEY_ACCESS,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}
+};
+#endif
+
+/* ZVSCAN argument table */
+struct COMMAND_ARG ZVSCAN_Args[] = {
+{MAKE_ARG("key",ARG_TYPE_KEY,0,NULL,NULL,NULL,CMD_ARG_NONE,0,NULL)},
+{MAKE_ARG("cursor",ARG_TYPE_INTEGER,-1,NULL,NULL,NULL,CMD_ARG_NONE,0,NULL)},
+{MAKE_ARG("pattern",ARG_TYPE_PATTERN,-1,"MATCH",NULL,NULL,CMD_ARG_OPTIONAL,0,NULL)},
+{MAKE_ARG("count",ARG_TYPE_INTEGER,-1,"COUNT",NULL,NULL,CMD_ARG_OPTIONAL,0,NULL)},
 };
 
 /********** ZVSCORE ********************/
@@ -13483,7 +13619,11 @@ struct COMMAND_STRUCT serverCommandTable[] = {
 {MAKE_CMD("zvcount","Returns the number of members in a ZVSET within a vector score range.","O(log(N))","9.2.0",CMD_DOC_NONE,NULL,NULL,"sorted_set",COMMAND_GROUP_SORTED_SET,ZVCOUNT_History,0,ZVCOUNT_Tips,0,zvcountCommand,4,CMD_READONLY|CMD_FAST,ACL_CATEGORY_FAST|ACL_CATEGORY_READ|ACL_CATEGORY_SORTEDSET,NULL,ZVCOUNT_Keyspecs,1,NULL,3),.args=ZVCOUNT_Args},
 {MAKE_CMD("zvincrby","Increments the vector score of a member in a ZVSET.","O(log(N))","9.2.0",CMD_DOC_NONE,NULL,NULL,"sorted_set",COMMAND_GROUP_SORTED_SET,ZVINCRBY_History,0,ZVINCRBY_Tips,0,zvincrbyCommand,4,CMD_WRITE|CMD_DENYOOM|CMD_FAST,ACL_CATEGORY_FAST|ACL_CATEGORY_SORTEDSET|ACL_CATEGORY_WRITE,NULL,ZVINCRBY_Keyspecs,1,NULL,3),.args=ZVINCRBY_Args},
 {MAKE_CMD("zvlexcount","Returns the number of members in a ZVSET member-name range. Requires uniform vector scores.","O(log(N))","9.2.0",CMD_DOC_NONE,NULL,NULL,"sorted_set",COMMAND_GROUP_SORTED_SET,ZVLEXCOUNT_History,0,ZVLEXCOUNT_Tips,0,zvlexcountCommand,4,CMD_READONLY|CMD_FAST,ACL_CATEGORY_FAST|ACL_CATEGORY_READ|ACL_CATEGORY_SORTEDSET,NULL,ZVLEXCOUNT_Keyspecs,1,NULL,3),.args=ZVLEXCOUNT_Args},
+{MAKE_CMD("zvmpop","Pops the first non-empty ZVSET among the keys.","O(log(N)*M)","9.2.0",CMD_DOC_NONE,NULL,NULL,"sorted_set",COMMAND_GROUP_SORTED_SET,ZVMPOP_History,0,ZVMPOP_Tips,0,zvmpopCommand,-4,CMD_WRITE|CMD_FAST,ACL_CATEGORY_FAST|ACL_CATEGORY_SORTEDSET|ACL_CATEGORY_WRITE,NULL,ZVMPOP_Keyspecs,1,NULL,4),.args=ZVMPOP_Args},
 {MAKE_CMD("zvmscore","Returns the vector scores of multiple members in a ZVSET.","O(1) for each member.","9.2.0",CMD_DOC_NONE,NULL,NULL,"sorted_set",COMMAND_GROUP_SORTED_SET,ZVMSCORE_History,0,ZVMSCORE_Tips,0,zvmscoreCommand,-3,CMD_READONLY|CMD_FAST,ACL_CATEGORY_FAST|ACL_CATEGORY_READ|ACL_CATEGORY_SORTEDSET,NULL,ZVMSCORE_Keyspecs,1,NULL,2),.args=ZVMSCORE_Args},
+{MAKE_CMD("zvpopmax","Removes and returns the highest-vector members in a ZVSET.","O(log(N)*M)","9.2.0",CMD_DOC_NONE,NULL,NULL,"sorted_set",COMMAND_GROUP_SORTED_SET,ZVPOPMAX_History,0,ZVPOPMAX_Tips,0,zvpopmaxCommand,-2,CMD_WRITE|CMD_FAST,ACL_CATEGORY_FAST|ACL_CATEGORY_SORTEDSET|ACL_CATEGORY_WRITE,NULL,ZVPOPMAX_Keyspecs,1,NULL,2),.args=ZVPOPMAX_Args},
+{MAKE_CMD("zvpopmin","Removes and returns the lowest-vector members in a ZVSET.","O(log(N)*M)","9.2.0",CMD_DOC_NONE,NULL,NULL,"sorted_set",COMMAND_GROUP_SORTED_SET,ZVPOPMIN_History,0,ZVPOPMIN_Tips,0,zvpopminCommand,-2,CMD_WRITE|CMD_FAST,ACL_CATEGORY_FAST|ACL_CATEGORY_SORTEDSET|ACL_CATEGORY_WRITE,NULL,ZVPOPMIN_Keyspecs,1,NULL,2),.args=ZVPOPMIN_Args},
+{MAKE_CMD("zvrandmember","Returns random members in a ZVSET.","O(1) single, O(N) distinct full scan worst case.","9.2.0",CMD_DOC_NONE,NULL,NULL,"sorted_set",COMMAND_GROUP_SORTED_SET,ZVRANDMEMBER_History,0,ZVRANDMEMBER_Tips,0,zvrandmemberCommand,-2,CMD_READONLY,ACL_CATEGORY_READ|ACL_CATEGORY_SORTEDSET|ACL_CATEGORY_SLOW,NULL,ZVRANDMEMBER_Keyspecs,1,NULL,3),.args=ZVRANDMEMBER_Args},
 {MAKE_CMD("zvrange","Returns members in a ZVSET range by index, vector score, or member name.","O(log(N)+M)","9.2.0",CMD_DOC_NONE,NULL,NULL,"sorted_set",COMMAND_GROUP_SORTED_SET,ZVRANGE_History,0,ZVRANGE_Tips,0,zvrangeCommand,-4,CMD_READONLY,ACL_CATEGORY_READ|ACL_CATEGORY_SORTEDSET|ACL_CATEGORY_SLOW,NULL,ZVRANGE_Keyspecs,1,NULL,7),.args=ZVRANGE_Args},
 {MAKE_CMD("zvrangebylex","Returns members in a ZVSET member-name range. Requires uniform vector scores.","O(log(N)+M)","9.2.0",CMD_DOC_NONE,NULL,NULL,"sorted_set",COMMAND_GROUP_SORTED_SET,ZVRANGEBYLEX_History,0,ZVRANGEBYLEX_Tips,0,zvrangebylexCommand,-4,CMD_READONLY,ACL_CATEGORY_READ|ACL_CATEGORY_SORTEDSET|ACL_CATEGORY_SLOW,NULL,ZVRANGEBYLEX_Keyspecs,1,NULL,4),.args=ZVRANGEBYLEX_Args},
 {MAKE_CMD("zvrangebyscore","Returns members in a ZVSET vector score range.","O(log(N)+M)","9.2.0",CMD_DOC_NONE,NULL,NULL,"sorted_set",COMMAND_GROUP_SORTED_SET,ZVRANGEBYSCORE_History,0,ZVRANGEBYSCORE_Tips,0,zvrangebyscoreCommand,-4,CMD_READONLY,ACL_CATEGORY_READ|ACL_CATEGORY_SORTEDSET|ACL_CATEGORY_SLOW,NULL,ZVRANGEBYSCORE_Keyspecs,1,NULL,5),.args=ZVRANGEBYSCORE_Args},
@@ -13497,6 +13637,7 @@ struct COMMAND_STRUCT serverCommandTable[] = {
 {MAKE_CMD("zvrevrangebylex","Returns members in a ZVSET member-name range, ordered from high to low. Requires uniform vector scores.","O(log(N)+M)","9.2.0",CMD_DOC_NONE,NULL,NULL,"sorted_set",COMMAND_GROUP_SORTED_SET,ZVREVRANGEBYLEX_History,0,ZVREVRANGEBYLEX_Tips,0,zvrevrangebylexCommand,-4,CMD_READONLY,ACL_CATEGORY_READ|ACL_CATEGORY_SORTEDSET|ACL_CATEGORY_SLOW,NULL,ZVREVRANGEBYLEX_Keyspecs,1,NULL,4),.args=ZVREVRANGEBYLEX_Args},
 {MAKE_CMD("zvrevrangebyscore","Returns members in a ZVSET vector score range, ordered from high to low.","O(log(N)+M)","9.2.0",CMD_DOC_NONE,NULL,NULL,"sorted_set",COMMAND_GROUP_SORTED_SET,ZVREVRANGEBYSCORE_History,0,ZVREVRANGEBYSCORE_Tips,0,zvrevrangebyscoreCommand,-4,CMD_READONLY,ACL_CATEGORY_READ|ACL_CATEGORY_SORTEDSET|ACL_CATEGORY_SLOW,NULL,ZVREVRANGEBYSCORE_Keyspecs,1,NULL,5),.args=ZVREVRANGEBYSCORE_Args},
 {MAKE_CMD("zvrevrank","Returns the reverse rank of a member in a ZVSET.","O(log(N))","9.2.0",CMD_DOC_NONE,NULL,NULL,"sorted_set",COMMAND_GROUP_SORTED_SET,ZVREVRANK_History,0,ZVREVRANK_Tips,0,zvrevrankCommand,-3,CMD_READONLY|CMD_FAST,ACL_CATEGORY_FAST|ACL_CATEGORY_READ|ACL_CATEGORY_SORTEDSET,NULL,ZVREVRANK_Keyspecs,1,NULL,3),.args=ZVREVRANK_Args},
+{MAKE_CMD("zvscan","Iterates members in a ZVSET with their vector scores.","O(1) per call, O(N) for a full iteration.","9.2.0",CMD_DOC_NONE,NULL,NULL,"sorted_set",COMMAND_GROUP_SORTED_SET,ZVSCAN_History,0,ZVSCAN_Tips,0,zvscanCommand,-3,CMD_READONLY,ACL_CATEGORY_READ|ACL_CATEGORY_SORTEDSET|ACL_CATEGORY_SLOW,NULL,ZVSCAN_Keyspecs,1,NULL,4),.args=ZVSCAN_Args},
 {MAKE_CMD("zvscore","Returns the vector score of a member in a ZVSET.","O(1)","9.2.0",CMD_DOC_NONE,NULL,NULL,"sorted_set",COMMAND_GROUP_SORTED_SET,ZVSCORE_History,0,ZVSCORE_Tips,0,zvscoreCommand,3,CMD_READONLY|CMD_FAST,ACL_CATEGORY_FAST|ACL_CATEGORY_READ|ACL_CATEGORY_SORTEDSET,NULL,ZVSCORE_Keyspecs,1,NULL,2),.args=ZVSCORE_Args},
 /* stream */
 {MAKE_CMD("xack","Returns the number of messages that were successfully acknowledged by the consumer group member of a stream.","O(1) for each message ID processed.","5.0.0",CMD_DOC_NONE,NULL,NULL,"stream",COMMAND_GROUP_STREAM,XACK_History,0,XACK_Tips,0,xackCommand,-4,CMD_WRITE|CMD_FAST,ACL_CATEGORY_FAST|ACL_CATEGORY_STREAM|ACL_CATEGORY_WRITE,NULL,XACK_Keyspecs,1,NULL,3),.args=XACK_Args},

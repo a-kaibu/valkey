@@ -1,0 +1,83 @@
+{
+    "ZVMPOP": {
+        "summary": "Pops the first non-empty ZVSET among the keys.",
+        "complexity": "O(log(N)*M)",
+        "group": "sorted_set",
+        "since": "9.2.0",
+        "arity": -4,
+        "function": "zvmpopCommand",
+        "command_flags": [
+            "WRITE",
+            "FAST"
+        ],
+        "acl_categories": [
+            "FAST",
+            "SORTEDSET",
+            "WRITE"
+        ],
+        "key_specs": [
+            {
+                "flags": [
+                    "RW",
+                    "DELETE"
+                ],
+                "begin_search": {
+                    "index": {
+                        "pos": 2
+                    }
+                },
+                "find_keys": {
+                    "keynum": {
+                        "keynumidx": 0,
+                        "firstkey": 1,
+                        "step": 1
+                    }
+                }
+            }
+        ],
+        "reply_schema": {
+            "oneOf": [
+                {
+                    "type": "array"
+                },
+                {
+                    "type": "null"
+                }
+            ]
+        },
+        "arguments": [
+            {
+                "name": "numkeys",
+                "type": "integer"
+            },
+            {
+                "name": "key",
+                "type": "key",
+                "key_spec_index": 0,
+                "multiple": true
+            },
+            {
+                "name": "where",
+                "type": "oneof",
+                "arguments": [
+                    {
+                        "name": "min",
+                        "token": "MIN",
+                        "type": "pure-token"
+                    },
+                    {
+                        "name": "max",
+                        "token": "MAX",
+                        "type": "pure-token"
+                    }
+                ]
+            },
+            {
+                "name": "count",
+                "token": "COUNT",
+                "type": "integer",
+                "optional": true
+            }
+        ]
+    }
+}
