@@ -25,7 +25,7 @@ NaN成分は0へ正規化)。
 
 SCAN: `ZVSCAN` (汎用SCAN経路, MATCH/COUNT, member+vector返却)。
 
-実験的: `ZVQUERY` (FILTER dim min maxのAND full-scan, LIMIT/WITHSCORES)。
+実験的: `ZVQUERY` (FILTER dim min maxのAND、先頭次元はtree range seek、LIMIT/WITHSCORES)。
 
 ## 構成
 
@@ -130,7 +130,7 @@ key単位で固定。最初の `ZVADD` で確定し、以降の不一致は
 | RANDMEMBER | `fbtreeGetAtRank()` (sparse Fisher-Yates)               |
 | SCAN       | hashtable走査 (`scanGenericCommand` 拡張)                |
 | RANGESTORE | `zvIterateRange()` 収集 → 新規build → 置換              |
-| QUERY      | `fbtreeNext()` full scan + `zvItemScoreAt()` filter     |
+| QUERY      | 先頭次元のtree range seek + `zvItemScoreAt()` filter     |
 | COPY       | 降順 `fbtreePrev()` walk + `fbtreeInsert`               |
 | RDB save   | hashtable walk → member + binary doubles                |
 | AOF rewrite| `ZVADD` 再発行 (`rewriteZvsetObject()`)                 |
@@ -246,7 +246,7 @@ dim-first/lastで大差なし (d16: 1.8ms vs 4.1ms、要再測定)。
 
 - listpack/compact encoding (全サイズfbtreeのまま)。
 - per-dimension ASC/DESC、多次元filterのsecondary index
-  (`ZVQUERY` はfull-scan reference)。
+  (`ZVQUERY` は先頭次元の範囲を既存treeで絞り込む)。
 - `RDB_TYPE_ZVSET=24` の正式type ID・RDB version対応の決定。
 - module API、cluster固有integrationの深掘り。
 - `unstable` への追随。
@@ -267,3 +267,70 @@ dim-first/lastで大差なし (d16: 1.8ms vs 4.1ms、要再測定)。
    full-scanのN件走査。
 6. 残課題: 前節の通り。データ構造の作り込みより、正しさの保証と
    ZSET/TairZset比較の実測継続を推奨。
+
+## 2026-10-11 local tuning measurements
+
+Baseline: `97a4e070e`; candidate: working tree. Ryzen 5 7545U, Linux x86-64,
+`-O3 -flto=auto`, jemalloc, persistence disabled, separate loopback servers.
+`utils/zv_cpu_benchmark.tcl --n 30000 --dims 16 --repeats 7` reports medians
+of `INFO commandstats` execution timers separately from client wall time.
+
+| Case | Baseline server µs | Candidate server µs | Server speedup | Client wall speedup |
+|---|---:|---:|---:|---:|
+| QUERY FILTER 0 50 50.01 | 107.88 | 0.56 | 192.6× | 27.2× |
+| QUERY LIMIT 10 | 42.41 | 0.81 | 52.4× | 4.3× |
+| QUERY offset 20000 | 43.71 | 0.65 | 67.2× | 4.0× |
+| QUERY last dimension | 246.56 | 207.97 | 1.19× | 1.08× |
+| RANGE 100 WITHSCORES | 96.80 | 64.54 | 1.50× | 1.16× |
+| UNIONSTORE 4 inputs, SUM | 56914.6 | 19856.6 | 2.87× | 2.86× |
+| DIFFSTORE 2 identical member sets | 1544.4 | 1057.6 | 1.46× | 1.44× |
+
+UNION aggregates packed items in its temporary hashtable before inserting each
+final item into the tree once. Set-operation lookups borrow packed input items.
+QUERY intersects dimension-zero bounds, seeks by rank, and compares residual
+filters using ordered bits. Score replies allocate their SDS once.
+
+Random sampling: `--suite random --n 100000 --dims 4 --repeats 7` and
+`--n 1000000 --dims 4 --repeats 5`, with the same server configuration.
+The percentages below are distinct sample sizes relative to cardinality.
+
+| Cardinality / sample | Baseline server ms | Candidate server ms | Server speedup | Client wall speedup |
+|---|---:|---:|---:|---:|
+| 100K / 1% | 0.3595 | 0.2275 | 1.58× | 1.16× |
+| 100K / 10% | 3.6195 | 2.4940 | 1.45× | 1.12× |
+| 100K / 25% | 8.8475 | 3.0570 | 2.89× | 1.30× |
+| 100K / 90% | 25.7370 | 7.2575 | 3.55× | 1.23× |
+| 100K / 100% | 11.2065 | 7.5205 | 1.49× | 1.04× |
+| 1M / 25% | 159.7620 | 63.1235 | 2.53× | 1.36× |
+| 1M / 50% | 355.8225 | 113.4525 | 3.14× | 1.41× |
+| 1M / 90% | 700.6555 | 180.3975 | 3.88× | 1.44× |
+| 1M / 100% | 318.4015 | 201.2140 | 1.58× | 1.09× |
+
+Dense distinct samples walk the tree once into a borrowed-pointer array, then
+use partial Fisher-Yates swaps. The array uses `sizeof(pointer) * N` temporary
+bytes. Sparse samples only store positions needed by future swaps. Single-input
+INTERCARD reads the existing cardinality and clamps LIMIT: 100K inputs went
+from 2.10 ms to below 1 µs; 1M inputs went from 39.52 ms to below 1 µs.
+Sub-microsecond command timers are quantized; no precise speedup is claimed.
+
+POP: `--suite pop --n 5000 --dims 16 --repeats 9` copies the source before
+each repeat, outside the timer. POPMAX count 1 improved from 1.536 to 1.182 µs
+(1.30× server, essentially unchanged client wall time); count 100 improved
+from 102.26 to 75.26 µs (1.36× server, 1.11× client wall time).
+Duplicate sampling has no claimed speedup: a focused alternating comparison
+on 30K / 16 dimensions measured baseline medians 8.96–9.49 µs and candidate
+medians 9.45–9.71 µs, with effectively equal client wall time. It did not
+reproduce the larger apparent slowdown in the short mixed-workload run.
+
+Validation: full integration suite 5906 passed, unit tests 870 passed, final
+ZVSET/ZSET regression 433 passed, ASan/UBSan ZVSET regression 69 passed.
+The full suite used an isolated checkout and a frozen binary; the final
+sparse-map store removal was subsequently covered by the targeted and
+sanitizer runs. Lua was built with ASan only because its unchanged code
+triggers UBSan alignment checks; the changed engine code used both sanitizers.
+Formatting used clang-format-21 because clang-format-18 was unavailable.
+
+Later dimensions still need a candidate scan; large replies remain limited by
+transport and client parsing. These local closed-loop measurements do not
+establish production tail latency. Small timings and three-repeat Tcl throughput
+results vary substantially; the benchmark retains minima and maxima.
