@@ -28,7 +28,7 @@ jobs:
     timeout-minutes: 7200
     steps:
       - name: Checkout valkey
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: valkey
           fetch-depth: 0
@@ -36,7 +36,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout valkey-perf-benchmark
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ github.repository_owner }}/valkey-perf-benchmark
           path: valkey-perf-benchmark
@@ -44,7 +44,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout valkey for latest benchmark.
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: valkey-io/valkey
           ref: "unstable"
@@ -53,7 +53,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Python
-        uses: kishaningithub/setup-python-amazon-linux@a326cdc792983fe0fbd04c81d3d62b59b6123a6c # v1.1.0
+        uses: kishaningithub/setup-python-amazon-linux@9d26405267fec46d3858425a12ed7c84d5f58042 # v1.1.2
         with:
           python-version: "3.10"
           cache: "pip"
@@ -135,7 +135,7 @@ jobs:
       - name: Upload artifacts
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ github.event.label.name }}-results
           path: |
@@ -143,7 +143,7 @@ jobs:
             comparison.md
 
       - name: Comment PR with results
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
@@ -179,7 +179,7 @@ jobs:
 
       - name: Remove ${{ github.event.label.name }} label
         if: always() && (github.event.label.name == 'run-benchmark' || github.event.label.name == 'run-cluster-benchmark')
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |

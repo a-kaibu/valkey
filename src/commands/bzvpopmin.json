@@ -1,0 +1,56 @@
+{
+    "BZVPOPMIN": {
+        "summary": "Removes and returns the lowest-vector member, blocking if empty.",
+        "complexity": "O(log(N))",
+        "group": "sorted_set",
+        "since": "9.2.0",
+        "arity": -3,
+        "function": "bzvpopminCommand",
+        "command_flags": [
+            "WRITE",
+            "BLOCKING",
+            "FAST"
+        ],
+        "acl_categories": [
+            "BLOCKING",
+            "FAST",
+            "SORTEDSET",
+            "WRITE"
+        ],
+        "key_specs": [
+            {
+                "flags": [
+                    "RW",
+                    "DELETE"
+                ],
+                "begin_search": {
+                    "index": {
+                        "pos": 1
+                    }
+                },
+                "find_keys": {
+                    "range": {
+                        "lastkey": -2,
+                        "step": 1,
+                        "limit": 0
+                    }
+                }
+            }
+        ],
+        "reply_schema": {
+            "type": "array"
+        },
+        "arguments": [
+            {
+                "name": "key",
+                "type": "key",
+                "key_spec_index": 0,
+                "multiple": true
+            },
+            {
+                "name": "timeout",
+                "type": "double"
+            }
+        ]
+    }
+}
