@@ -1011,12 +1011,13 @@ start_server {overrides {forkless-infrastructure-enabled yes save ""}} {
         set num_keys 100
         createComplexDatasetForVerification r $num_keys
         
-        # Set TTLs on all keys - key i expires in (i/10 + 1) seconds
+        # Use a common absolute deadline: assigning relative TTLs sequentially
+        # shifts later keys' expiration under slow or sanitizer builds.
         set start_time [clock milliseconds]
         for {set i 0} {$i < $num_keys} {incr i} {
-            set ttl [expr {$i/10 + 1}]
+            set expire_at [expr {$start_time + ($i/10 + 1) * 1000}]
             foreach prefix {before int lst set zset hash hll bits geo geo_set stream iset} {
-                r expire ${prefix}_${i} $ttl
+                r pexpireat ${prefix}_${i} $expire_at
             }
         }
         
@@ -1039,11 +1040,10 @@ start_server {overrides {forkless-infrastructure-enabled yes save ""}} {
         }
         
         while {[llength $verified] > 0} {
-            set elapsed_time [expr {([clock milliseconds] - $start_time) / 1000.0}]
-            
             foreach i $verified {
-                # If not yet expired, verify all data types exist
-                if {$elapsed_time < [expr {$i/10.0}]} {
+                set elapsed_time [expr {([clock milliseconds] - $start_time) / 1000.0}]
+                # Leave a one-second margin around each expiration deadline.
+                if {$elapsed_time < [expr {$i/10}]} {
                     assert_equal [r exists before_${i}] 1
                     assert_equal [r exists int_${i}] 1
                     assert_equal [r exists lst_${i}] 1
@@ -1058,8 +1058,8 @@ start_server {overrides {forkless-infrastructure-enabled yes save ""}} {
                     assert_equal [r exists iset_${i}] 1
                 }
                 
-                # If expired for more than 2 seconds, verify all data types are gone
-                if {$elapsed_time > [expr {$i/10.0 + 2}]} {
+                # If expired for more than one second, all data types are gone.
+                if {$elapsed_time > [expr {$i/10 + 2}]} {
                     assert_equal [r exists before_${i}] 0
                     assert_equal [r exists int_${i}] 0
                     assert_equal [r exists lst_${i}] 0
