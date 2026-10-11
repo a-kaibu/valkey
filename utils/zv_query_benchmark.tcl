@@ -4,7 +4,8 @@
 # Loads N members (uniform dim0 over 0..100 via spread genvec scaled),
 # then sweeps selectivity 100/10/1/0.1/0.01% on dim 0, filter counts
 # 1/2/3/5, target dimension first/last, and LIMIT 10/100/1000 effects.
-# Reports scanned N, matched M, and time.
+# Reports key cardinality N, matched M, and time. Candidate scan counts
+# depend on the server implementation and are not inferred from N.
 #
 # Usage:
 #   tclsh utils/zv_query_benchmark.tcl [--port 6379] [--n 100000]
@@ -35,6 +36,7 @@ for {set i 0} {$i < $argc} {incr i} {
 proc time_query {fd args} {
     set t0 [clock microseconds]
     set r [zvbench::req $fd ZVQUERY {*}$args]
+    if {[string index $r 0] eq "-"} {error "server error: $r"}
     set us [expr {[clock microseconds] - $t0}]
     return [list $us [llength $r]]
 }
@@ -65,8 +67,8 @@ foreach f {100 10 1 0.1 0.01} {
     set hi [format %.2f [expr {50.0 + $span / 2}]]
     lassign [time_query $fd $key FILTER 0 $lo $hi] us m
     puts [format "sel=%-5s%% dim0 M=%-7d %8.1f ms" $f $m [expr {$us / 1000.0}]]
-    zvbench::row $dims spread QUERY-sel$f [expr {1000000.0 / $us}] "" "" \
-        [dict create selectivity $f matched $m scanned $N latency_us [expr {$us / 1000.0}]]
+    zvbench::row $dims rand_uniform QUERY-sel$f [expr {1000000.0 / $us}] "" "" \
+        [dict create selectivity $f matched $m cardinality $N latency_us $us]
 }
 
 # Filter count sweep: 10% window per dimension, independent dims, so
@@ -79,24 +81,24 @@ for {set nf 1} {$nf <= 5} {incr nf} {
     }
     lassign [time_query $fd {*}$q] us m
     puts [format "filters=%d M=%-7d %8.1f ms" $nf $m [expr {$us / 1000.0}]]
-    zvbench::row $dims spread QUERY-F$nf [expr {1000000.0 / $us}] "" "" \
-        [dict create filters $nf matched $m scanned $N latency_us [expr {$us / 1000.0}]]
+    zvbench::row $dims rand_uniform QUERY-F$nf [expr {1000000.0 / $us}] "" "" \
+        [dict create filters $nf matched $m cardinality $N latency_us $us]
 }
 
 # Target dimension: first vs last (same selectivity window).
 foreach {label dim} [list first 0 last [expr {$dims - 1}]] {
     lassign [time_query $fd $key FILTER $dim 49.5 50.5] us m
     puts [format "dim-%-5s M=%-7d %8.1f ms" $label $m [expr {$us / 1000.0}]]
-    zvbench::row $dims spread QUERY-dim-$label [expr {1000000.0 / $us}] "" "" \
-        [dict create matched $m scanned $N latency_us [expr {$us / 1000.0}]]
+    zvbench::row $dims rand_uniform QUERY-dim-$label [expr {1000000.0 / $us}] "" "" \
+        [dict create matched $m cardinality $N latency_us $us]
 }
 
 # LIMIT effect on a 10% query.
 foreach lim {10 100 1000} {
     lassign [time_query $fd $key FILTER 0 45 55 LIMIT 0 $lim] us m
     puts [format "limit=%-4d M=%-7d %8.1f ms" $lim $m [expr {$us / 1000.0}]]
-    zvbench::row $dims spread QUERY-limit$lim [expr {1000000.0 / $us}] "" "" \
-        [dict create limit $lim matched $m scanned $N latency_us [expr {$us / 1000.0}]]
+    zvbench::row $dims rand_uniform QUERY-limit$lim [expr {1000000.0 / $us}] "" "" \
+        [dict create limit $lim matched $m cardinality $N latency_us $us]
 }
 } ;# end repeat loop
 
