@@ -1,7 +1,7 @@
 {
     "ZVRANDMEMBER": {
         "summary": "Returns random members in a ZVSET.",
-        "complexity": "O(1) single, O(N) distinct full scan worst case.",
+        "complexity": "O(log(N)) for a single member; O(M*log(N)) for sparse or duplicate samples; O(N) for dense distinct samples. N is the cardinality and M is the requested sample size.",
         "group": "sorted_set",
         "since": "9.2.0",
         "arity": -2,

@@ -1,7 +1,7 @@
 {
     "ZVQUERY": {
-        "summary": "Experimental multi-dimensional conditional scan over a ZVSET (full-scan reference).",
-        "complexity": "O(N*F) where N is the cardinality and F the filter count.",
+        "summary": "Experimental multi-dimensional conditional scan over a ZVSET.",
+        "complexity": "O(F+log(N)+C*(F+1)) with a filter on dimension zero, where C is the candidate count; O(N*(F+1)) otherwise. N is the cardinality and F the filter count.",
         "group": "sorted_set",
         "since": "9.2.0",
         "arity": -2,

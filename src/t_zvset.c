@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) Valkey Contributors
+ * All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause
+ */
+
 #include "server.h"
 #include "zvset.h"
 #include "sds.h"
@@ -568,8 +574,7 @@ void zvrangeCommand(client *c) {
 /* Normalize [start,stop] rank bounds against len. With reverse, ranks
  * count from the head of the reversed set, i.e. forward window
  * [len-1-stop, len-start). */
-static void zvRankWindow(unsigned long len, long start, long stop, int reverse, unsigned long *lo,
-                         unsigned long *hi) {
+static void zvRankWindow(unsigned long len, long start, long stop, int reverse, unsigned long *lo, unsigned long *hi) {
     if (start < 0) start = (long)len + start;
     if (stop < 0) stop = (long)len + stop;
     if (start < 0) start = 0;
@@ -1583,23 +1588,38 @@ void zvrandmemberCommand(client *c) {
         want = len;
     }
 
-    if (allow_dup || want >= len) {
-        /* Duplicates allowed, or full-set shuffle. */
-        unsigned long *ranks = NULL;
+    if (want == 0) {
+        addReplyArrayLen(c, 0);
+        return;
+    }
+
+    if (allow_dup || want >= len / 4) {
+        /* Dense distinct samples use a pointer array: the tree is walked
+         * once rather than searched independently for every chosen rank.
+         * Sparse samples below retain the smaller temporary rank map. */
+        const_sds *items = NULL;
         if (!allow_dup) {
-            ranks = zmalloc(sizeof(*ranks) * len);
-            for (unsigned long i = 0; i < len; i++) ranks[i] = i;
+            items = zmalloc(sizeof(*items) * len);
+            fbtreeIterator it;
+            fbtreeInitIterator(&it, zs->tree);
             for (unsigned long i = 0; i < len; i++) {
-                unsigned long j = i + zvRandomBelow(len - i);
-                unsigned long tmp = ranks[i];
-                ranks[i] = ranks[j];
-                ranks[j] = tmp;
+                items[i] = fbtreeNext(&it);
+                serverAssert(items[i] != NULL);
             }
         }
         addReplyArrayLen(c, (withscores && c->resp <= 2) ? want * 2 : want);
         for (unsigned long i = 0; i < want; i++) {
-            unsigned long r = allow_dup ? zvRandomBelow(len) : ranks[i];
-            const_sds item = fbtreeGetAtRank(zs->tree, r);
+            const_sds item;
+            if (allow_dup) {
+                item = fbtreeGetAtRank(zs->tree, zvRandomBelow(len));
+            } else {
+                /* Partial Fisher-Yates preserves uniform sampling without
+                 * replacement, including the full-set permutation. */
+                unsigned long j = i + zvRandomBelow(len - i);
+                item = items[j];
+                items[j] = items[i];
+                items[i] = item;
+            }
             serverAssert(item != NULL);
             size_t member_len;
             const char *member = zvItemMember(item, &member_len);
@@ -1612,22 +1632,22 @@ void zvrandmemberCommand(client *c) {
             }
             if (c->flag.close_asap) break;
         }
-        zfree(ranks);
+        zfree(items);
         return;
     }
 
     /* Distinct partial sample: sparse Fisher-Yates with a temporary
      * rank->rank map backed by a small hashtable. Position i is fixed by
      * swapping in a random later position j; the value moved into i (vj)
-     * is emitted. */
+     * is emitted. Position i is never read again, so only j needs to be
+     * stored for future swaps. */
     hashtable *map = hashtableCreate(&zvRankMapHashtableType);
     addReplyArrayLen(c, (withscores && c->resp <= 2) ? want * 2 : want);
     for (unsigned long i = 0; i < want; i++) {
         unsigned long j = i + zvRandomBelow(len - i);
         unsigned long vi = zvRankMapGet(map, i, i);
         unsigned long vj = zvRankMapGet(map, j, j);
-        zvRankMapSet(map, i, vj);
-        zvRankMapSet(map, j, vi);
+        if (j != i) zvRankMapSet(map, j, vi);
         const_sds item = fbtreeGetAtRank(zs->tree, vj);
         serverAssert(item != NULL);
         size_t member_len;
@@ -1653,17 +1673,17 @@ void zvscanCommand(client *c) {
     scanGenericCommand(c, o, cursor);
 }
 
-/* Experimental multi-dimensional filter scan (full-scan reference).
- * No secondary index: every item is visited in vector order. */
+/* Multi-dimensional filter scan. The leading dimension uses the tree's
+ * vector order to restrict the scan without a secondary index. */
 typedef struct zvQueryFilter {
     long dimension;
     int min_ex, max_ex;
     int min_unbounded, max_unbounded;
-    double min, max;
+    uint64_t min, max; /* Host-endian sortable scores. */
 } zvQueryFilter;
 
 /* Parse one scalar bound: "-", "+", "(1.5" or "1.5". NaN rejected. */
-static int zvQueryParseBound(const char *str, size_t len, int is_min, double *val, int *exclusive, int *unbounded) {
+static int zvQueryParseBound(const char *str, size_t len, int is_min, uint64_t *val, int *exclusive, int *unbounded) {
     *exclusive = 0;
     *unbounded = 0;
     if (len == 1 && ((is_min && str[0] == '-') || (!is_min && str[0] == '+'))) {
@@ -1677,14 +1697,18 @@ static int zvQueryParseBound(const char *str, size_t len, int is_min, double *va
     }
     double v;
     if (!string2d(str, len, &v)) return C_ERR;
-    *val = v;
+    *val = ntohu64(zvScoreToSortable(v));
     return C_OK;
 }
 
 static int zvQueryMatches(const zvQueryFilter *filters, int nfilters, const_sds item) {
     for (int i = 0; i < nfilters; i++) {
         const zvQueryFilter *f = &filters[i];
-        double value = zvItemScoreAt(item, (uint8_t)f->dimension);
+        /* Compare the canonical ordered bits directly, without decoding
+         * a double and undoing the sign transform for every candidate. */
+        uint64_t value;
+        memcpy(&value, item + 1 + (size_t)f->dimension * 8, sizeof(value));
+        value = ntohu64(value);
         if (!f->min_unbounded && (value < f->min || (value == f->min && f->min_ex))) return 0;
         if (!f->max_unbounded && (value > f->max || (value == f->max && f->max_ex))) return 0;
     }
@@ -1767,21 +1791,78 @@ void zvqueryCommand(client *c) {
         }
     }
 
-    /* Full scan in vector order, streamed with a deferred length so no
-     * transient copy of the result set is needed. */
+    if (count == 0) {
+        addReplyArrayLen(c, 0);
+        return;
+    }
+
+    /* Intersect all bounds on dimension zero. A short packed prefix
+     * includes every suffix with that score; its byte successor excludes
+     * every suffix, including members with embedded NULs. */
+    sds lower = NULL, upper = NULL;
+    for (int i = 0; i < nfilters; i++) {
+        const zvQueryFilter *f = &filters[i];
+        if (f->dimension != 0) continue;
+        for (int side = 0; side < 2; side++) {
+            if (side ? f->max_unbounded : f->min_unbounded) continue;
+            char prefix[9];
+            prefix[0] = (char)zs->dimensions;
+            uint64_t score = htonu64(side ? f->max : f->min);
+            memcpy(prefix + 1, &score, sizeof(score));
+            sds bound = sdsnewlen(prefix, sizeof(prefix));
+            if (side ? !f->max_ex : f->min_ex) {
+                sds successor = zvBoundSuccessor(bound);
+                sdsfree(bound);
+                bound = successor;
+            }
+            sds *target = side ? &upper : &lower;
+            if (*target == NULL || (side ? sdscmp(bound, *target) < 0 : sdscmp(bound, *target) > 0)) {
+                sdsfree(*target);
+                *target = bound;
+            } else {
+                sdsfree(bound);
+            }
+        }
+    }
+    unsigned long lo, hi;
+    zvScoreRanks(zs, lower, upper, &lo, &hi);
+    sdsfree(lower);
+    sdsfree(upper);
+
+    /* Dimension-zero predicates are guaranteed by the indexed bounds.
+     * When no residual predicates remain, LIMIT offset is a rank seek
+     * rather than a walk through every skipped match. */
+    int residual = 0;
+    for (int i = 0; i < nfilters; i++) {
+        if (filters[i].dimension != 0) filters[residual++] = filters[i];
+    }
+    nfilters = residual;
+    if (nfilters == 0) {
+        unsigned long skip = (unsigned long)offset;
+        if (skip > hi - lo) skip = hi - lo;
+        lo += skip;
+        offset = 0;
+    }
+    if (lo == hi) {
+        addReplyArrayLen(c, 0);
+        return;
+    }
+
+    /* Stream in vector order with no transient copy of the result set. */
     void *arraylen_ptr = addReplyDeferredLen(c);
     long emitted = 0;
     long skipped = 0;
     fbtreeIterator it;
     fbtreeInitIterator(&it, zs->tree);
+    if (lo) fbtreeSeekToRank(&it, lo);
     const_sds item;
-    while ((item = fbtreeNext(&it)) != NULL) {
+    unsigned long remaining = hi - lo;
+    while (remaining-- && (item = fbtreeNext(&it)) != NULL) {
         if (!zvQueryMatches(filters, nfilters, item)) continue;
         if (skipped < offset) {
             skipped++;
             continue;
         }
-        if (count >= 0 && emitted >= count) break;
         size_t member_len;
         const char *member = zvItemMember(item, &member_len);
         /* RESP3 nests [member, score] pairs like ZRANGE; RESP2 stays flat. */
@@ -1792,6 +1873,7 @@ void zvqueryCommand(client *c) {
             addReplyBulkSds(c, formatted);
         }
         emitted++;
+        if (count >= 0 && emitted >= count) break;
     }
     setDeferredArrayLen(c, arraylen_ptr, (withscores && c->resp <= 2) ? emitted * 2 : emitted);
 }
@@ -1922,6 +2004,13 @@ static void zvsetopGenericCommand(client *c, robj *dstkey, int numkeysIndex, int
 
     /* INTERCARD: count only, smallest input drives, early exit at LIMIT. */
     if (cardinality_only) {
+        if (setnum == 1) {
+            unsigned long cardinality = zvSetOpSrcLen(&src[0]);
+            if (limit && cardinality > (unsigned long)limit) cardinality = (unsigned long)limit;
+            zfree(src);
+            addReplyLongLong(c, (long long)cardinality);
+            return;
+        }
         long driver = -1;
         for (long i = 0; i < setnum; i++) {
             if (src[i].subject == NULL) {
@@ -1937,11 +2026,6 @@ static void zvsetopGenericCommand(client *c, robj *dstkey, int numkeysIndex, int
             hashtableInitIterator(&iter, dzs->ht, 0);
             void *next;
             while (hashtableNext(&iter, &next)) {
-                size_t mlen;
-                const char *member = zvItemMember(next, &mlen);
-                /* Borrowed member slice as a lookup key: copy to a
-                 * temporary SDS for the marking protocol. */
-                sds tmp = sdsnewlen(member, mlen);
                 int present = 1;
                 for (long i = 0; i < setnum; i++) {
                     if (i == driver) continue;
@@ -1949,12 +2033,12 @@ static void zvsetopGenericCommand(client *c, robj *dstkey, int numkeysIndex, int
                         present = 0;
                         break;
                     }
-                    if (zvsetFind(objectGetVal(src[i].subject), tmp) == NULL) {
+                    zvset *izs = objectGetVal(src[i].subject);
+                    if (!hashtableFind(izs->ht, next, NULL)) {
                         present = 0;
                         break;
                     }
                 }
-                sdsfree(tmp);
                 if (!present) continue;
                 cardinality++;
                 if (limit && cardinality >= (unsigned long)limit) break;
@@ -1989,28 +2073,35 @@ static void zvsetopGenericCommand(client *c, robj *dstkey, int numkeysIndex, int
                 const char *member = zvItemMember(next, &mlen);
                 zvItemToScore(next, scratch_a);
                 zvScoreApplyWeight(scratch_b, scratch_a, src[i].weight);
-                sds mtmp = sdsnewlen(member, mlen);
-                zsetMarkLookupKey(mtmp);
-                void **slot = hashtableFindRef(tmp->ht, mtmp);
-                zsetUnmarkLookupKey(mtmp);
+                /* Packed items already extract to their member, so the
+                 * input item is also an allocation-free lookup key. */
+                void **slot = hashtableFindRef(tmp->ht, next);
                 if (slot == NULL) {
                     sds item = zvItemCreate(scratch_b, member, mlen);
-                    sds inserted = fbtreeInsert(tmp->tree, item);
-                    serverAssert(hashtableAdd(tmp->ht, inserted));
+                    serverAssert(hashtableAdd(tmp->ht, item));
                 } else {
                     zvItemToScore(*slot, scratch_a);
                     zvScoreAggregate(scratch_a, scratch_b, aggregate);
-                    if (!zvItemScoreEquals(*slot, scratch_a)) {
-                        const_sds old = *slot;
-                        sds item = zvItemCreate(scratch_a, member, mlen);
-                        serverAssert(fbtreeDelete(tmp->tree, old));
-                        *slot = fbtreeInsert(tmp->tree, item);
+                    /* Only the member participates in hashing. Before
+                     * tree insertion, scores can be updated in place. */
+                    sds item = *slot;
+                    for (int d = 0; d < dims; d++) {
+                        uint64_t score = zvScoreToSortable(scratch_a->values[d]);
+                        memcpy(item + 1 + (size_t)d * 8, &score, sizeof(score));
                     }
                 }
-                sdsfree(mtmp);
             }
             hashtableCleanupIterator(&iter);
         }
+        /* Transfer every accumulated item to the owning tree once. No
+         * temporary result escapes before the tree owns all its items. */
+        hashtableIterator iter;
+        hashtableInitIterator(&iter, tmp->ht, 0);
+        void *next;
+        while (hashtableNext(&iter, &next)) {
+            serverAssert(fbtreeInsert(tmp->tree, next) == next);
+        }
+        hashtableCleanupIterator(&iter);
     } else if (op == ZV_OP_INTER && dims) {
         /* Smallest non-empty input drives. */
         long driver = -1;
@@ -2032,17 +2123,16 @@ static void zvsetopGenericCommand(client *c, robj *dstkey, int numkeysIndex, int
                 const char *member = zvItemMember(next, &mlen);
                 zvItemToScore(next, scratch_a);
                 zvScoreApplyWeight(scratch_c, scratch_a, src[driver].weight);
-                sds mtmp = sdsnewlen(member, mlen);
                 int k;
                 for (k = 0; k < setnum; k++) {
                     if (k == driver) continue;
-                    void *found = zvsetFind(objectGetVal(src[k].subject), mtmp);
-                    if (found == NULL) break;
+                    zvset *izs = objectGetVal(src[k].subject);
+                    void *found;
+                    if (!hashtableFind(izs->ht, next, &found)) break;
                     zvItemToScore(found, scratch_a);
                     zvScoreApplyWeight(scratch_b, scratch_a, src[k].weight);
                     zvScoreAggregate(scratch_c, scratch_b, aggregate);
                 }
-                sdsfree(mtmp);
                 if (k == setnum) zvSetOpResultInsert(tmp, scratch_c, member, mlen);
             }
             hashtableCleanupIterator(&iter);
@@ -2056,15 +2146,12 @@ static void zvsetopGenericCommand(client *c, robj *dstkey, int numkeysIndex, int
             hashtableInitIterator(&iter, first->ht, 0);
             void *next;
             while (hashtableNext(&iter, &next)) {
-                size_t mlen;
-                const char *member = zvItemMember(next, &mlen);
-                sds mtmp = sdsnewlen(member, mlen);
                 int k;
                 for (k = 1; k < setnum; k++) {
                     if (src[k].subject == NULL) continue;
-                    if (zvsetFind(objectGetVal(src[k].subject), mtmp) != NULL) break;
+                    zvset *izs = objectGetVal(src[k].subject);
+                    if (hashtableFind(izs->ht, next, NULL)) break;
                 }
-                sdsfree(mtmp);
                 if (k == setnum) {
                     sds copy = sdsdup(next);
                     sds inserted = fbtreeInsert(tmp->tree, copy);

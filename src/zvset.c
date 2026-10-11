@@ -118,14 +118,15 @@ int zvScoreIncrement(zvScore *result, const zvScore *base, const zvScore *delta)
 
 /* Format a parsed vector as "v0#v1#...". */
 sds zvScoreFormat(const zvScore *score) {
-    sds out = sdsempty();
-    char buf[128];
+    /* fpconv_dtoa writes at most 24 bytes per component. Build the
+     * complete vector before allocating its SDS, avoiding repeated growth. */
+    char buf[ZVSET_MAX_DIMENSIONS * 25];
+    size_t len = 0;
     for (int i = 0; i < score->len; i++) {
-        if (i > 0) out = sdscatlen(out, "#", 1);
-        int len = fpconv_dtoa(score->values[i], buf);
-        out = sdscatlen(out, buf, (size_t)len);
+        if (i > 0) buf[len++] = '#';
+        len += fpconv_dtoa(score->values[i], buf + len);
     }
-    return out;
+    return sdsnewlen(buf, len);
 }
 
 /* --- Score range bounds (BYSCORE) --- */
@@ -351,7 +352,18 @@ double zvItemScoreAt(const_sds item, uint8_t dimension) {
     return zvSortableToScore(sortable);
 }
 
-/* Compare decoded scores. Used for update fast-path. */
+/* Compare only as far as the first differing component. Packed scores
+ * are canonical and byte ordered, so GT/LT need no decoded allocation. */
+static int zvItemScoreCompare(const_sds item, const zvScore *score) {
+    serverAssert((uint8_t)item[0] == score->len);
+    for (int i = 0; i < score->len; i++) {
+        uint64_t sortable = zvScoreToSortable(score->values[i]);
+        int cmp = memcmp(item + 1 + (size_t)i * 8, &sortable, sizeof(sortable));
+        if (cmp) return cmp;
+    }
+    return 0;
+}
+
 int zvItemScoreEquals(const_sds item, const zvScore *score) {
     uint8_t dims = (uint8_t)item[0];
     if (dims != score->len) return 0;
@@ -376,15 +388,14 @@ int zvItemScoreEquals(const_sds item, const zvScore *score) {
 /* Format vector as "v0#v1#...". Uses fpconv_dtoa like ZSET replies. */
 sds zvItemFormatScore(const_sds item) {
     uint8_t dims = (uint8_t)item[0];
-    sds out = sdsempty();
-    char buf[128];
+    char buf[ZVSET_MAX_DIMENSIONS * 25];
+    size_t len = 0;
     for (int i = 0; i < dims; i++) {
-        if (i > 0) out = sdscatlen(out, "#", 1);
+        if (i > 0) buf[len++] = '#';
         double v = zvItemScoreAt(item, (uint8_t)i);
-        int len = fpconv_dtoa(v, buf);
-        out = sdscatlen(out, buf, (size_t)len);
+        len += fpconv_dtoa(v, buf + len);
     }
-    return out;
+    return sdsnewlen(buf, len);
 }
 
 /* --- Hashtable support ---
@@ -514,13 +525,10 @@ int zvsetAdd(zvset *zs, const zvScore *score, sds member, int in_flags, int *out
         const_sds old_item = *item_ref;
         if (zvItemScoreEquals(old_item, score)) return C_OK;
 
-        /* GT/LT compare the full vector lexicographically. */
+        /* GT/LT compare only through the first differing component. */
         if (gt || lt) {
-            zvScore *cur = zvScoreCreate(zs->dimensions);
-            zvsetItemToScore(old_item, cur);
-            int cmp = zvScoreCompare(score, cur);
-            zvScoreFree(cur);
-            if ((gt && cmp <= 0) || (lt && cmp >= 0)) {
+            int cmp = zvItemScoreCompare(old_item, score);
+            if ((gt && cmp >= 0) || (lt && cmp <= 0)) {
                 *out_flags |= ZVADD_OUT_NOP;
                 return C_OK;
             }

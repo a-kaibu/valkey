@@ -1,7 +1,7 @@
 {
     "ZVINTERCARD": {
         "summary": "Returns the cardinality of the intersection (with LIMIT).",
-        "complexity": "O(N*K)",
+        "complexity": "O(1) for a single key; O(N*K) otherwise, where N is the smallest input cardinality and K is the number of keys.",
         "group": "sorted_set",
         "since": "9.2.0",
         "command_flags": [

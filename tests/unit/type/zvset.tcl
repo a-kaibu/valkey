@@ -440,6 +440,50 @@ start_server {tags {"zvset"}} {
         assert_equal {} [r zvrandmember nokey 5]
     }
 
+    test "ZVRANDMEMBER sparse, dense and full samples across tree leaves" {
+        r del random-many
+        set pairs {}
+        set scores {}
+        for {set i 0} {$i < 1024} {incr i} {
+            set member "m$i"
+            set score "7#$i"
+            lappend pairs $score $member
+            dict set scores $member $score
+        }
+        foreach member [list "" "binary\x00\xff"] {
+            lappend pairs 7#1024 $member
+            dict set scores $member 7#1024
+        }
+        r zvadd random-many {*}$pairs
+        set original [r zvrange random-many 0 -1 withscores]
+        set n [dict size $scores]
+        foreach count {0 1 10 255 256 257 341 342 343 512 1025 1026 2048} {
+            set expected [expr {min($count, $n)}]
+            set sample [r zvrandmember random-many $count]
+            assert_equal $expected [llength $sample]
+            assert_equal $expected [llength [lsort -unique $sample]]
+            foreach member $sample {assert {[dict exists $scores $member]}}
+            set sample [r zvrandmember random-many $count withscores]
+            assert_equal [expr {$expected * 2}] [llength $sample]
+            set members {}
+            foreach {member score} $sample {
+                assert_equal [dict get $scores $member] $score
+                lappend members $member
+            }
+            assert_equal $expected [llength [lsort -unique $members]]
+        }
+        r hello 3
+        set sample [r zvrandmember random-many 512 withscores]
+        assert_equal 512 [llength $sample]
+        foreach pair $sample {
+            assert_equal 2 [llength $pair]
+            lassign $pair member score
+            assert_equal [dict get $scores $member] $score
+        }
+        r hello 2
+        assert_equal $original [r zvrange random-many 0 -1 withscores]
+    }
+
     test "ZVRANDMEMBER extreme counts are rejected safely" {
         zv_create q 1#1 x 2#2 y
         assert_error "*out of range*" {r zvrandmember q -9223372036854775808 withscores}
@@ -830,6 +874,12 @@ start_server {tags {"zvset-setops"}} {    proc zv_setup_setops {} {
         assert_equal 1 [r zvintercard 2 a{zvs} b{zvs} limit 1]
         assert_equal 0 [r zvintercard 2 a{zvs} nokey]
         assert_error "*negative*" {r zvintercard 2 a{zvs} b{zvs} limit -1}
+        assert_equal 3 [r zvintercard 1 a{zvs}]
+        assert_equal 3 [r zvintercard 1 a{zvs} limit 0]
+        assert_equal 1 [r zvintercard 1 a{zvs} limit 1]
+        assert_equal 3 [r zvintercard 1 a{zvs} limit 10]
+        assert_equal 0 [r zvintercard 1 nokey limit 1]
+        assert_error "*negative*" {r zvintercard 1 a{zvs} limit -1}
     }
 
     test "ZVUNIONSTORE INTERSTORE DIFFSTORE" {        zv_setup_setops
@@ -1001,5 +1051,107 @@ start_server {tags {"zvset-query"}} {
         # wrong type
         r set s str
         assert_error "*WRONGTYPE*" {r zvquery s filter 0 0 10}
+    }
+
+    test "ZVQUERY seeks across tied scores, binary members and infinities" {
+        r del seek
+        set binary "a\x00\xff"
+        r zvadd seek -inf#0 low -1#0 neg 0#-inf zero-low -0#inf $binary 1#0 one inf#0 high
+        assert_equal [list zero-low $binary] [r zvquery seek filter 0 -0 0]
+        assert_equal {one high} [r zvquery seek filter 0 (0 +]
+        assert_equal {low neg} [r zvquery seek filter 0 - (0]
+        assert_equal {low} [r zvquery seek filter 0 -inf -inf]
+        assert_equal {high} [r zvquery seek filter 0 inf inf]
+        assert_equal {} [r zvquery seek filter 0 (inf +]
+        assert_equal {} [r zvquery seek filter 0 - (-inf]
+        assert_equal {neg zero-low} [r zvquery seek filter 0 -1 1 limit 0 2]
+        assert_equal [list $binary one] [r zvquery seek filter 0 -1 1 limit 2 -1]
+        assert_equal {} [r zvquery seek filter 0 2 3]
+        assert_equal {} [r zvquery seek filter 0 -3 -2]
+        assert_equal {} [r zvquery seek filter 0 0 + filter 0 - (0]
+        assert_equal {one} [r zvquery seek filter 0 -1 1 filter 0 (0 inf]
+        assert_equal {one} [r zvquery seek filter 0 (0 inf filter 0 -1 1]
+        assert_error "*out of range*" {r zvquery seek filter 2 0 1 limit 0 0}
+    }
+
+    test "ZVQUERY indexed bounds agree with a full scan over multiple tree leaves" {
+        r del query-many
+        for {set i 0} {$i < 2000} {incr i} {
+            r zvadd query-many "[expr {($i * 37) % 101 - 50}]#[expr {$i % 17}]" m$i
+        }
+        set all [r zvrange query-many 0 -1 withscores]
+        foreach min {-50 -7 0 13 50 51} {
+            foreach max {-51 -7 0 13 50} {
+                foreach exclusive {0 1} {
+                    set expected {}
+                    set first_only {}
+                    foreach {member score} $all {
+                        lassign [split $score #] first second
+                        if {($exclusive ? $first > $min : $first >= $min) && $first <= $max} {
+                            lappend first_only $member
+                            if {$second >= 3 && $second < 11} {lappend expected $member}
+                        }
+                    }
+                    set lower [expr {$exclusive ? "($min" : "$min"}]
+                    assert_equal $expected [r zvquery query-many filter 1 3 (11 filter 0 $lower $max]
+                    assert_equal [lrange $expected 3 9] [r zvquery query-many filter 0 $lower $max filter 1 3 (11 limit 3 7]
+                    assert_equal [lrange $first_only 3 9] [r zvquery query-many filter 0 $lower $max limit 3 7]
+                }
+            }
+        }
+        set members [r zvrange query-many 0 -1]
+        assert_equal [lrange $members 1995 end] [r zvquery query-many limit 1995 -1]
+        assert_equal {} [r zvquery query-many limit 2000000000 10]
+    }
+
+    test "ZV set operations use packed lookup keys with different scores" {
+        r del packed-a packed-b packed-result
+        set members [list "" "a\x00\xff" [string repeat x 300]]
+        foreach member $members {
+            r zvadd packed-a 1#2 $member
+            r zvadd packed-b 3#4 $member
+        }
+        r zvadd packed-a 5#6 only-a
+        r zvadd packed-b 7#8 only-b
+        assert_equal 3 [r zvintercard 2 packed-a packed-b]
+        assert_equal 2 [r zvintercard 2 packed-a packed-b limit 2]
+        assert_equal {only-a} [r zvdiff 2 packed-a packed-b]
+        assert_equal 3 [r zvinterstore packed-result 2 packed-a packed-b]
+        foreach member $members {
+            assert_equal 4#6 [r zvscore packed-result $member]
+        }
+        assert_equal 5 [r zvunionstore packed-result 2 packed-a packed-b]
+        foreach member $members {
+            assert_equal 4#6 [r zvscore packed-result $member]
+        }
+    }
+
+    test "ZV maximum dimension score formatting and late GT LT comparison" {
+        r del format-max
+        set values {}
+        set extremes {-inf -1.7976931348623157e308 -0 2.2250738585072014e-308 1.7976931348623157e308 inf}
+        for {set i 0} {$i < 255} {incr i} {
+            lappend values [lindex $extremes [expr {$i % [llength $extremes]}]]
+        }
+        set vector [join $values #]
+        r zvadd format-max $vector extreme
+        set formatted [r zvscore format-max extreme]
+        set decoded [split $formatted #]
+        assert_equal 255 [llength $decoded]
+        foreach expected $values actual $decoded {
+            assert_equal [expr {double($expected)}] [expr {double($actual)}]
+        }
+        assert_equal $formatted [r zvincrby format-max [join [lrepeat 255 0] #] extreme]
+        assert_equal 0 [r zvadd format-max CH $formatted extreme]
+
+        set prefix [lrepeat 254 1]
+        set small [join [concat $prefix 2] #]
+        set large [join [concat $prefix 3] #]
+        r zvadd format-max $small late
+        assert_equal 1 [r zvadd format-max GT CH $large late]
+        assert_equal 0 [r zvadd format-max GT CH $small late]
+        assert_equal 1 [r zvadd format-max LT CH $small late]
+        assert_equal 0 [r zvadd format-max LT CH $large late]
+        assert_equal $small [r zvscore format-max late]
     }
 }
