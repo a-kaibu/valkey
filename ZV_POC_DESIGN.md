@@ -94,16 +94,21 @@ storage representationと分離。将来的なprotocol変更はparser差し替�
   fbtreeなし。rank系はbinary search、member lookupはtag配列を線形走査し
   tag一致時だけitemを参照。
 - 閾値はZSETのlistpackと同じ `zset-max-listpack-entries` (128) /
-  `zset-max-listpack-value` (64)。超えた時点でbtreeへ変換 (item pointerは
+  `zset-max-listpack-value` (64)。設定値に関わらずcompactは最大4096要素
+  (線形lookupと32bit countの上限)。超えた時点でbtreeへ変換 (item pointerは
   そのまま移すのでcopyなし)。in placeでの逆変換はしない。
 - STORE系 (`ZVRANGESTORE`, `ZVUNIONSTORE` 等) とRDB loadは結果サイズで
-  最初からencodingを選ぶ。INTER/DIFFSTOREは結果が小さければcompactへ戻す。
+  最初からencodingを選ぶ。UNION/INTER/DIFFSTOREは結果itemを集めてから
+  基数ソート (第1成分) し、順番にtreeへ挿入する (ランダム挿入を避ける)。
 - encoding差は `src/zvset.c` の container API (`zvsetFind`, `zvsetRankOf`,
   `zvsetGetAtRank`, `zvsetPop`, `zvsetDeleteRangeByRank`, `zvsetIterator`
   など) に閉じており、t_zvset.c・rdb・aof・digest・scanはencodingを見ない
   (SCANとdefragのみcompact用の分岐あり)。
 - テストは `tests/unit/type/zvset.tcl` 全体を両encodingで実行し、
-  compact/btreeの差分ファジングも行う。
+  compact/btreeの差分ファジングも行う。永続化とレプリケーション
+  (RDB/AOF/DUMP-RESTORE/full sync/コマンド伝播、壊れたpayloadの拒否) は
+  `tests/integration/zvset-durability.tcl`、壊れたRESTOREのファジングは
+  既存の `corrupt-dump-fuzzer` (zvsetキーを追加)。CIはASan/UBSan/Valgrind。
 
 ## ownership rule (btree)
 

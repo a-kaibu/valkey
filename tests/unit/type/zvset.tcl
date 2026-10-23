@@ -1279,6 +1279,19 @@ start_server {tags {"zvset-encoding needs:debug"}} {
         r config set zset-max-listpack-entries 128
     }
 
+    test "ZVSET compact encoding has a hard entry cap" {
+        r config set zset-max-listpack-entries 1000000
+        r del k
+        set args {}
+        for {set i 0} {$i < 4096} {incr i} {lappend args $i m$i}
+        r zvadd k {*}$args
+        assert_encoding compact k
+        r zvadd k 5000 extra
+        assert_encoding btree k
+        assert_equal 4097 [r zvcard k]
+        r config set zset-max-listpack-entries 128
+    }
+
     test "ZVSET member longer than zset-max-listpack-value converts to btree" {
         r config set zset-max-listpack-value 8
         r del k

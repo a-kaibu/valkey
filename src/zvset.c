@@ -224,8 +224,14 @@ sds zvBoundSuccessor(const_sds bound) {
  * Everything below this section reaches the items only through these
  * helpers, so the rest of the type is encoding independent. */
 
+/* Hard cap on compact entries whatever zset-max-listpack-entries says:
+ * member lookups and inserts are linear in a compact set, and its count
+ * and capacity are 32 bit. */
+#define ZVSET_COMPACT_MAX_ENTRIES 4096
+
 static inline int zvsetFitsCompact(unsigned long count, size_t member_len) {
-    return count <= server.zset_max_listpack_entries && member_len <= server.zset_max_listpack_value;
+    return count <= server.zset_max_listpack_entries && count <= ZVSET_COMPACT_MAX_ENTRIES &&
+           member_len <= server.zset_max_listpack_value;
 }
 
 static inline size_t zvItemMemberLen(const_sds item) {
