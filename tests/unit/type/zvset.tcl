@@ -81,6 +81,18 @@ foreach {zv_encoding zv_max_entries} {compact 128 btree 0} {
             assert_equal 0 [r exists x]
         }
 
+        test "ZV score components: integer fast path and float fallback agree" {
+            r del x
+            # Integers up to 15 digits take the fast path; longer ones,
+            # signs other than '-', exponents and fractions use string2d.
+            r zvadd x -0#007#+3#1e2#-12#999999999999999#1234567890123456#2.5 a
+            assert_equal {0#7#3#100#-12#999999999999999#1234567890123456#2.5} [r zvscore x a]
+            foreach bad {- -- --1 1-2 1a 0x10 " 1" nan} {
+                assert_error "*invalid vector*" {r zvadd x "$bad#0#0#0#0#0#0#0" b}
+            }
+            assert_equal 1 [r zvcard x]
+        }
+
         test "ZVADD flags NX XX CH" {
             zv_create x 1 a
             assert_equal 0 [r zvadd x NX 2 a]

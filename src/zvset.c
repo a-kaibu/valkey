@@ -38,6 +38,22 @@ double zvSortableToScore(uint64_t sortable) {
     return score;
 }
 
+/* Fast path for the common integer component: an optional '-' and at most
+ * 15 digits, which a double holds exactly. Returns 0 for anything else,
+ * which then goes through string2d(). */
+static inline int zvParseSmallInteger(const char *s, size_t len, double *out) {
+    size_t i = s[0] == '-';
+    if (len == i || len - i > 15) return 0;
+    int64_t v = 0;
+    for (size_t j = i; j < len; j++) {
+        unsigned d = (unsigned char)s[j] - '0';
+        if (d > 9) return 0;
+        v = v * 10 + d;
+    }
+    *out = (double)(i ? -v : v);
+    return 1;
+}
+
 /* Parse "v0#v1#...#vn" into out (room for ZVSET_MAX_DIMENSIONS values).
  * Returns the number of components, or 0 on any error: empty string or
  * component, more than ZVSET_MAX_DIMENSIONS components, NaN or an invalid
@@ -49,7 +65,8 @@ int zvScoreParseInto(const char *str, size_t len, double *out) {
     for (size_t i = 0; i <= len; i++) {
         if (i < len && str[i] != '#') continue;
         double v;
-        if (i == start || count == ZVSET_MAX_DIMENSIONS || !string2d(str + start, i - start, &v) || isnan(v))
+        if (i == start || count == ZVSET_MAX_DIMENSIONS) return 0;
+        if (!zvParseSmallInteger(str + start, i - start, &v) && (!string2d(str + start, i - start, &v) || isnan(v)))
             return 0;
         out[count++] = v == 0.0 ? 0.0 : v;
         start = i + 1;
