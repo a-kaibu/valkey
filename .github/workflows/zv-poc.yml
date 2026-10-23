@@ -158,6 +158,86 @@ jobs:
           path: /tmp/ab-*
           if-no-files-found: warn
 
+  zset-ab:
+    # Existing ZSET commands must not slow down: compare this branch with
+    # the upstream base by server time and by callgrind instruction counts,
+    # and compare ZV (1 dimension) with ZSET on this branch.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout Valkey
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Build head and base
+        id: base
+        run: |
+          sudo apt-get install -y tcl8.6 valgrind
+          base="$(git rev-parse origin/base-9.2.0-rc1)"
+          echo "sha=$base" >> "$GITHUB_OUTPUT"
+          # One make in src/: the top-level Makefile would run one sub-make
+          # per goal in parallel and race.
+          make -j"$(nproc)" -C src valkey-server valkey-cli
+          cp src/valkey-server /tmp/valkey-server-head
+          git worktree add /tmp/base "$base"
+          make -C /tmp/base/src -j"$(nproc)" valkey-server
+          cp /tmp/base/src/valkey-server /tmp/valkey-server-base
+      - name: Server time (alternating, 5 rounds)
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/zset-ab
+          start() {
+            "$1" --port 7791 --daemonize yes --save '' --appendonly no --logfile /tmp/zset-ab/server.log
+            timeout 30 bash -c 'until ./src/valkey-cli -p 7791 ping 2>/dev/null | grep -q PONG; do sleep 0.2; done'
+          }
+          stop() {
+            ./src/valkey-cli -p 7791 SHUTDOWN NOSAVE || true
+            timeout 30 bash -c 'while ./src/valkey-cli -p 7791 ping >/dev/null 2>&1; do sleep 0.2; done'
+          }
+          for round in 1 2 3 4 5; do
+            for side in base head; do
+              start /tmp/valkey-server-$side
+              timeout 600 tclsh utils/zset_compare_benchmark.tcl --port 7791 --kinds z > /tmp/zset-ab/time-$side-$round.tsv
+              stop
+            done
+          done
+          for round in 1 2 3; do
+            start /tmp/valkey-server-head
+            timeout 600 tclsh utils/zset_compare_benchmark.tcl --port 7791 --kinds "z zv" > /tmp/zset-ab/zv-head-$round.tsv
+            stop
+          done
+      - name: Instruction counts (callgrind)
+        run: |
+          set -euo pipefail
+          for side in base head; do
+            mkdir -p /tmp/zset-ab/ir-$side
+            valgrind --tool=callgrind --callgrind-out-file=/tmp/zset-ab/ir-$side/cg.out \
+              /tmp/valkey-server-$side --port 7792 --save '' --appendonly no --logfile /tmp/zset-ab/cg-server.log &
+            pid=$!
+            timeout 120 bash -c 'until ./src/valkey-cli -p 7792 ping 2>/dev/null | grep -q PONG; do sleep 0.5; done'
+            ZCMP_CALLGRIND_PID=$pid timeout 1800 tclsh utils/zset_compare_benchmark.tcl --port 7792 \
+              --n 3000 --repeats 1 --kinds z > /tmp/zset-ab/ir-$side.tsv
+            ./src/valkey-cli -p 7792 SHUTDOWN NOSAVE || true
+            wait $pid || true
+          done
+      - name: Summarize
+        if: always()
+        run: |
+          python3 utils/zset_ab_summary.py /tmp/zset-ab "${{ steps.base.outputs.sha }}" "${{ github.sha }}" \
+            | tee /tmp/zset-ab/summary.md >> "$GITHUB_STEP_SUMMARY"
+          # Also as an annotation: readable through the checks API where
+          # job logs and artifacts are not.
+          python3 -c 'import sys; t = open("/tmp/zset-ab/summary.md").read(); print("::notice title=zset-ab summary::" + t.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))'
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: zset-ab
+          path: |
+            /tmp/zset-ab/*.tsv
+            /tmp/zset-ab/summary.md
+          if-no-files-found: warn
+
   zv-bench:
     runs-on: ubuntu-latest
     # GitHub-hosted max: 6h. Full bench (N=1M, all dims, both dists).
