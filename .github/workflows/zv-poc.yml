@@ -6,7 +6,7 @@ name: ZV PoC tests + benchmarks
 # - zv-sanitizer runs the ZV tests and the corrupt-payload fuzzer under
 #   ASan and UBSan; zv-valgrind runs the ZV tests under Valgrind.
 # - zv-bench runs the full basic benchmark (N=1000000, dims 1/2/4/8/16,
-#   spread+shared) on push and on workflow_dispatch. With bench=all it
+#   spread+shared) on workflow_dispatch only. With bench=all it
 #   additionally runs the range/pop/setops/query benchmark scripts.
 
 on:
@@ -35,12 +35,6 @@ on:
         options:
           - basic
           - all
-
-concurrency:
-  group: zv-poc-${{ github.head_ref || github.ref }}
-  # Never cancel ZV runs: each push's test/bench results must survive
-  # newer pushes.
-  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -276,6 +270,12 @@ jobs:
           if-no-files-found: warn
 
   zv-bench:
+    # The full benchmark takes hours, so it runs only on request and never
+    # holds up the test and A/B jobs of later pushes.
+    if: github.event_name == 'workflow_dispatch'
+    concurrency:
+      group: zv-bench-${{ github.ref }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     # GitHub-hosted max: 6h. Full bench (N=1M, all dims, both dists).
     timeout-minutes: 360
