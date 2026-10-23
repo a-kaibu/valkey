@@ -363,6 +363,7 @@ typedef enum blocking_type {
     BLOCKED_POSTPONE, /* Blocked by processCommand, re-try processing later. */
     BLOCKED_SHUTDOWN, /* SHUTDOWN. */
     BLOCKED_INUSE,    /* Key in use by background thread. */
+    BLOCKED_ZVSET,    /* BZVPOP et al. */
     BLOCKED_NUM,      /* Number of blocked states. */
     BLOCKED_END       /* End of enumeration */
 } blocking_type;
@@ -4340,6 +4341,8 @@ void zvscoreCommand(client *c);
 void zvmscoreCommand(client *c);
 void zvrankCommand(client *c);
 void zvrevrankCommand(client *c);
+void zvrankbyscoreCommand(client *c);
+void zvrevrankbyscoreCommand(client *c);
 void zvrangeCommand(client *c);
 void zvrevrangeCommand(client *c);
 void zvrangebyscoreCommand(client *c);

@@ -221,6 +221,7 @@ void unblockClient(client *c, int queue_for_reprocessing) {
     switch (c->bstate->btype) {
     case BLOCKED_LIST:
     case BLOCKED_ZSET:
+    case BLOCKED_ZVSET:
     case BLOCKED_STREAM:
         unblockClientWaitingData(c);
         break;
@@ -278,6 +279,7 @@ int blockedClientMayTimeout(client *c) {
 
     if (c->bstate->btype == BLOCKED_LIST ||
         c->bstate->btype == BLOCKED_ZSET ||
+        c->bstate->btype == BLOCKED_ZVSET ||
         c->bstate->btype == BLOCKED_STREAM ||
         c->bstate->btype == BLOCKED_WAIT) {
         return 1;
@@ -289,7 +291,8 @@ int blockedClientMayTimeout(client *c) {
  * send it a reply of some kind. After this function is called,
  * unblockClient() will be called with the same client as argument. */
 void replyToBlockedClientTimedOut(client *c) {
-    if (c->bstate->btype == BLOCKED_LIST || c->bstate->btype == BLOCKED_ZSET || c->bstate->btype == BLOCKED_STREAM) {
+    if (c->bstate->btype == BLOCKED_LIST || c->bstate->btype == BLOCKED_ZSET || c->bstate->btype == BLOCKED_ZVSET ||
+        c->bstate->btype == BLOCKED_STREAM) {
         addReplyNullArray(c);
         updateStatsOnUnblock(c, 0, 0, 0);
     } else if (c->bstate->btype == BLOCKED_WAIT) {
@@ -363,7 +366,8 @@ void disconnectOrRedirectAllBlockedClients(void) {
                 /* if the client is read-only and blocked by a read command, we do not unblock it */
                 if (c->flag.readonly && !(c->lastcmd->flags & CMD_WRITE)) continue;
                 if (clientSupportStandAloneRedirect(c) && (c->bstate->btype == BLOCKED_LIST || c->bstate->btype == BLOCKED_ZSET ||
-                                                           c->bstate->btype == BLOCKED_STREAM || c->bstate->btype == BLOCKED_MODULE)) {
+                                                           c->bstate->btype == BLOCKED_ZVSET || c->bstate->btype == BLOCKED_STREAM ||
+                                                           c->bstate->btype == BLOCKED_MODULE)) {
                     if (c->bstate->btype == BLOCKED_MODULE && !moduleClientIsBlockedOnKeys(c)) continue;
                     /* Client has redirect capability and blocked on keys */
                     addReplyErrorSds(c, sdscatprintf(sdsempty(), "-REDIRECT %s:%d", server.primary_host, server.primary_port));
@@ -524,12 +528,7 @@ static blocking_type getBlockedTypeByType(int type) {
     switch (type) {
     case OBJ_LIST: return BLOCKED_LIST;
     case OBJ_ZSET: return BLOCKED_ZSET;
-    case OBJ_ZVSET:
-        /* ZVSET shares the ZSET blocking type. Wake-up only fires on key
-         * creation (dbAdd), and both BZPOP* and BZVPOP* re-validate the
-         * key type when unblocked, so a cross-type wake-up safely ends
-         * in a WRONGTYPE error instead of a crash. */
-        return BLOCKED_ZSET;
+    case OBJ_ZVSET: return BLOCKED_ZVSET;
     case OBJ_MODULE: return BLOCKED_MODULE;
     case OBJ_STREAM: return BLOCKED_STREAM;
     default: return BLOCKED_NONE;
@@ -739,7 +738,7 @@ static void unblockClientOnKey(client *c, robj *key) {
     /* Only in case of blocking API calls, we might be blocked on several keys.
        however we should force unblock the entire blocking keys */
     serverAssert(c->bstate->btype == BLOCKED_STREAM || c->bstate->btype == BLOCKED_LIST ||
-                 c->bstate->btype == BLOCKED_ZSET);
+                 c->bstate->btype == BLOCKED_ZSET || c->bstate->btype == BLOCKED_ZVSET);
 
     /* We need to unblock the client before calling processCommandAndResetClient
      * because it checks the CLIENT_BLOCKED flag */
