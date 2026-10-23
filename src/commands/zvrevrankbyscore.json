@@ -1,0 +1,55 @@
+{
+    "ZVREVRANKBYSCORE": {
+        "summary": "Returns the rank a vector score would take in a ZVSET, ordered from high to low.",
+        "complexity": "O(log(N)) with N being the number of members in the sorted set.",
+        "group": "sorted_set",
+        "since": "9.2.0",
+        "arity": 3,
+        "function": "zvrevrankbyscoreCommand",
+        "command_flags": [
+            "READONLY",
+            "FAST"
+        ],
+        "acl_categories": [
+            "FAST",
+            "READ",
+            "SORTEDSET"
+        ],
+        "key_specs": [
+            {
+                "flags": [
+                    "RO",
+                    "ACCESS"
+                ],
+                "begin_search": {
+                    "index": {
+                        "pos": 1
+                    }
+                },
+                "find_keys": {
+                    "range": {
+                        "lastkey": 0,
+                        "step": 1,
+                        "limit": 0
+                    }
+                }
+            }
+        ],
+        "reply_schema": {
+            "type": "integer",
+            "description": "Number of members ordered before the score (equal scores count after it for ZVRANKBYSCORE, before it for ZVREVRANKBYSCORE).",
+            "minimum": 0
+        },
+        "arguments": [
+            {
+                "name": "key",
+                "type": "key",
+                "key_spec_index": 0
+            },
+            {
+                "name": "score",
+                "type": "string"
+            }
+        ]
+    }
+}

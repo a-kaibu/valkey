@@ -31,6 +31,8 @@
 #include "hashtable.h"
 #include "server.h"
 #include "ordered_index.h"
+#include "zvset.h"
+#include "fbtree.h"
 #include "serverassert.h"
 #include "functions.h"
 #include "intset.h" /* Compact integer set structure */
@@ -683,6 +685,24 @@ robj *createZsetListpackObject(void) {
     return o;
 }
 
+/* The object encoding of every zvset is OBJ_ENCODING_BTREE; the zvset
+ * itself tracks whether it is compact or a btree (zvsetIsCompact()),
+ * since it converts inside its own operations. */
+robj *createZvsetObject(uint8_t dimensions) {
+    return createZvsetObjectFrom(zvsetCreate(dimensions));
+}
+
+robj *createZvsetObjectFrom(zvset *zs) {
+    robj *o = createObject(OBJ_ZVSET, zs);
+    objectSetEncoding(o, OBJ_ENCODING_BTREE);
+    return o;
+}
+
+unsigned long zvsetObjectLength(const robj *zobj) {
+    serverAssert(objectGetType(zobj) == OBJ_ZVSET);
+    return zvsetLength(objectGetVal(zobj));
+}
+
 robj *createStreamObject(void) {
     stream *s = streamNew();
     robj *o = createObject(OBJ_STREAM, s);
@@ -736,6 +756,13 @@ void freeZsetObject(robj *o) {
     }
 }
 
+void freeZvsetObject(robj *o) {
+    switch (objectGetEncoding(o)) {
+    case OBJ_ENCODING_BTREE: zvsetRelease(objectGetVal(o)); break;
+    default: serverPanic("Unknown zvset encoding");
+    }
+}
+
 void freeHashObject(robj *o) {
     switch (objectGetEncoding(o)) {
     case OBJ_ENCODING_HASHTABLE:
@@ -781,6 +808,7 @@ void decrRefCount(robj *o) {
             case OBJ_MODULE: freeModuleObject(o); break;
             case OBJ_STREAM: freeStreamObject(o); break;
             case OBJ_PATH_HASH: freePathHashObject(o); break;
+            case OBJ_ZVSET: freeZvsetObject(o); break;
             default: serverPanic("Unknown object type"); break;
             }
         }
@@ -882,6 +910,28 @@ void dismissZsetObject(robj *o, size_t size_hint) {
 }
 
 /* See dismissObject() */
+void dismissZvsetObject(robj *o, size_t size_hint) {
+    if (objectGetEncoding(o) == OBJ_ENCODING_BTREE) {
+        zvset *zs = objectGetVal(o);
+        unsigned long len = zvsetLength(zs);
+        serverAssert(len != 0);
+        if (zvsetIsCompact(zs)) {
+            if (size_hint / len >= server.page_size) {
+                for (uint32_t i = 0; i < zs->count; i++) dismissSds(zs->items[i]);
+            }
+            dismissMemory(zs->items, zmalloc_size(zs->items));
+            return;
+        }
+        if (size_hint / len >= server.page_size) {
+            fbtreeDismissMemory(zs->tree);
+        }
+        dismissHashtable(zs->ht);
+    } else {
+        serverPanic("Unknown zvset encoding type");
+    }
+}
+
+/* See dismissObject() */
 void dismissHashObject(robj *o, size_t size_hint) {
     if (objectGetEncoding(o) == OBJ_ENCODING_HASHTABLE) {
         hashtable *ht = objectGetVal(o);
@@ -954,6 +1004,7 @@ void dismissObject(robj *o, size_t size_hint) {
     case OBJ_ZSET: dismissZsetObject(o, size_hint); break;
     case OBJ_HASH: dismissHashObject(o, size_hint); break;
     case OBJ_STREAM: dismissStreamObject(o, size_hint); break;
+    case OBJ_ZVSET: dismissZvsetObject(o, size_hint); break;
     default: break;
     }
 #else
@@ -1325,6 +1376,13 @@ char *strEncoding(int encoding) {
     }
 }
 
+/* Encoding name reported for o. A zvset tracks its own representation
+ * (see createZvsetObject()). */
+const char *objectEncodingName(robj *o) {
+    if (objectGetType(o) == OBJ_ZVSET) return zvsetEncodingName(objectGetVal(o));
+    return strEncoding(objectGetEncoding(o));
+}
+
 /* =========================== Memory introspection ========================= */
 
 
@@ -1400,6 +1458,12 @@ size_t objectComputeSize(robj *key, robj *o, size_t sample_size, int dbid) {
             if (samples) asize += (double)elesize / samples * hashtableSize(zs->ht);
         } else {
             serverPanic("Unknown sorted set encoding");
+        }
+    } else if (objectGetType(o) == OBJ_ZVSET) {
+        if (objectGetEncoding(o) == OBJ_ENCODING_BTREE) {
+            asize += zvsetAllocSize(objectGetVal(o), sample_size);
+        } else {
+            serverPanic("Unknown zvset encoding");
         }
     } else if (objectGetType(o) == OBJ_HASH) {
         if (objectGetEncoding(o) == OBJ_ENCODING_LISTPACK) {
@@ -1867,7 +1931,7 @@ void objectCommand(client *c) {
         addReplyLongLong(c, objectGetRefcount(o));
     } else if (!strcasecmp(objectGetVal(c->argv[1]), "encoding") && c->argc == 3) {
         if ((o = objectCommandLookupOrReply(c, c->argv[2], shared.null[c->resp])) == NULL) return;
-        addReplyBulkCString(c, strEncoding(objectGetEncoding(o)));
+        addReplyBulkCString(c, objectEncodingName(o));
     } else if (!strcasecmp(objectGetVal(c->argv[1]), "idletime") && c->argc == 3) {
         if ((o = objectCommandLookupOrReply(c, c->argv[2], shared.null[c->resp])) == NULL) return;
         if (server.maxmemory_policy & MAXMEMORY_FLAG_LFU) {

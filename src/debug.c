@@ -29,6 +29,8 @@
 
 #include "server.h"
 #include "ordered_index.h"
+#include "zvset.h"
+#include "fbtree.h"
 #include "util.h"
 #include "sha1.h" /* SHA1 is used for DEBUG DIGEST */
 #include "crc64.h"
@@ -275,6 +277,21 @@ void xorObjectDigest(serverDb *db, robj *keyobj, unsigned char *digest, robj *o)
         streamIteratorStop(&si);
     } else if (objectGetType(o) == OBJ_PATH_HASH) {
         pathHashTypeDigest(digest, o);
+    } else if (objectGetType(o) == OBJ_ZVSET) {
+        unsigned char eledigest[20];
+        zvsetIterator iter;
+        zvsetInitIterator(&iter, objectGetVal(o));
+        const_sds item;
+        while ((item = zvsetNext(&iter)) != NULL) {
+            size_t member_len;
+            const char *member = zvItemMember(item, &member_len);
+            sds formatted = zvItemFormatScore(item);
+            memset(eledigest, 0, 20);
+            mixDigest(eledigest, member, member_len);
+            mixDigest(eledigest, formatted, sdslen(formatted));
+            sdsfree(formatted);
+            xorDigest(digest, eledigest, 20);
+        }
     } else if (objectGetType(o) == OBJ_MODULE) {
         ValkeyModuleDigest md = {{0}, {0}, keyobj, db->id};
         moduleValue *mv = objectGetVal(o);
@@ -706,7 +723,7 @@ void debugCommand(client *c) {
             addReplyErrorObject(c, shared.nokeyerr);
             return;
         }
-        strenc = strEncoding(val->encoding);
+        strenc = (char *)objectEncodingName(val);
 
         char extra[138] = {0};
         if (val->encoding == OBJ_ENCODING_QUICKLIST) {
@@ -1262,6 +1279,8 @@ void serverLogObjectDebugInfo(const robj *o) {
             extern int orderedIndexGetHeight(const OrderedIndex *oi);
             serverLog(LL_WARNING, "Index height: %d", orderedIndexGetHeight(((const zset *)o->ptr)->oi));
         }
+    } else if (objectGetType(o) == OBJ_ZVSET) {
+        serverLog(LL_WARNING, "ZVSET size: %d", (int)zvsetObjectLength(o));
     } else if (objectGetType(o) == OBJ_STREAM) {
         serverLog(LL_WARNING, "Stream size: %d", (int)streamLength(o));
     } else if (objectGetType(o) == OBJ_PATH_HASH) {

@@ -22,6 +22,7 @@ proc generate_collections {suffix elements} {
         $rd hset hash$suffix $j $val
         $rd lpush list$suffix $val
         $rd zadd zset$suffix $j $val
+        $rd zvadd zvset$suffix "$j#[expr {-$j}]#0.5" $val
         $rd sadd set$suffix $val
         $rd xadd stream$suffix * item 1 value $val
     }

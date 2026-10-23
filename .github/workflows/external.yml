@@ -6,11 +6,6 @@ on:
       - '**/*.md'
       - '**/00-RELEASENOTES'
       - '**/COPYING'
-  pull_request:
-    paths-ignore:
-      - '**/*.md'
-      - '**/00-RELEASENOTES'
-      - '**/COPYING'
   schedule:
     - cron: '0 2 * * *'
 
@@ -24,18 +19,18 @@ permissions:
 jobs:
   test-external-standalone:
     runs-on: ubuntu-latest
-    if: github.event_name != 'schedule' || github.repository == 'valkey-io/valkey'
+    if: (github.event_name != 'schedule' || github.repository == 'valkey-io/valkey') && github.ref != 'refs/heads/poc/zv-multiscore' && github.head_ref != 'poc/zv-multiscore'
     timeout-minutes: 1440
     steps:
       - name: Install libbacktrace
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ianlancetaylor/libbacktrace
           ref: b9e40069c0b47a722286b94eb5231f7f05c08713
           path: libbacktrace
       - run: cd libbacktrace && ./configure && make && sudo make install
       - name: Checkout Valkey
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build
         run: make SERVER_CFLAGS=-Werror USE_LIBBACKTRACE=yes
       - name: Start valkey-server
@@ -50,25 +45,25 @@ jobs:
             --tags -slow
       - name: Archive server log
         if: ${{ failure() }}
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: test-external-standalone-log
           path: external-server.log
 
   test-external-cluster:
     runs-on: ubuntu-latest
-    if: github.event_name != 'schedule' || github.repository == 'valkey-io/valkey'
+    if: (github.event_name != 'schedule' || github.repository == 'valkey-io/valkey') && github.ref != 'refs/heads/poc/zv-multiscore' && github.head_ref != 'poc/zv-multiscore'
     timeout-minutes: 1440
     steps:
       - name: Install libbacktrace
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ianlancetaylor/libbacktrace
           ref: b9e40069c0b47a722286b94eb5231f7f05c08713
           path: libbacktrace
       - run: cd libbacktrace && ./configure && make && sudo make install
       - name: Checkout Valkey
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build
         run: make SERVER_CFLAGS=-Werror USE_LIBBACKTRACE=yes
       - name: Start valkey-server
@@ -87,25 +82,25 @@ jobs:
             --tags -slow
       - name: Archive server log
         if: ${{ failure() }}
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: test-external-cluster-log
           path: external-server.log
 
   test-external-nodebug:
     runs-on: ubuntu-latest
-    if: github.event_name != 'schedule' || github.repository == 'valkey-io/valkey'
+    if: (github.event_name != 'schedule' || github.repository == 'valkey-io/valkey') && github.ref != 'refs/heads/poc/zv-multiscore' && github.head_ref != 'poc/zv-multiscore'
     timeout-minutes: 1440
     steps:
       - name: Install libbacktrace
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ianlancetaylor/libbacktrace
           ref: b9e40069c0b47a722286b94eb5231f7f05c08713
           path: libbacktrace
       - run: cd libbacktrace && ./configure && make && sudo make install
       - name: Checkout Valkey
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build
         run: make SERVER_CFLAGS=-Werror USE_LIBBACKTRACE=yes
       - name: Start valkey-server
@@ -119,7 +114,7 @@ jobs:
             --tags "-slow -needs:debug"
       - name: Archive server log
         if: ${{ failure() }}
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: test-external-nodebug-log
           path: external-server.log

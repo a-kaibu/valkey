@@ -1,0 +1,55 @@
+{
+    "ZVREM": {
+        "summary": "Removes one or more members from a ZVSET.",
+        "complexity": "O(log(N)) for each member removed.",
+        "group": "sorted_set",
+        "since": "9.2.0",
+        "arity": -3,
+        "function": "zvremCommand",
+        "command_flags": [
+            "WRITE",
+            "FAST"
+        ],
+        "acl_categories": [
+            "FAST",
+            "SORTEDSET",
+            "WRITE"
+        ],
+        "key_specs": [
+            {
+                "flags": [
+                    "RW",
+                    "DELETE"
+                ],
+                "begin_search": {
+                    "index": {
+                        "pos": 1
+                    }
+                },
+                "find_keys": {
+                    "range": {
+                        "lastkey": 0,
+                        "step": 1,
+                        "limit": 0
+                    }
+                }
+            }
+        ],
+        "reply_schema": {
+            "type": "integer",
+            "description": "The number of members removed."
+        },
+        "arguments": [
+            {
+                "name": "key",
+                "type": "key",
+                "key_spec_index": 0
+            },
+            {
+                "name": "member",
+                "type": "string",
+                "multiple": true
+            }
+        ]
+    }
+}

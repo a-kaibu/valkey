@@ -35,6 +35,8 @@
 #include "hashtable.h"
 #include "server.h"
 #include "ordered_index.h"
+#include "zvset.h"
+#include "fbtree.h"
 #include "lzf.h" /* LZF compression library */
 #include "zipmap.h"
 #include "endianconv.h"
@@ -788,6 +790,7 @@ int rdbGetObjectType(robj *o, int rdbver) {
             return RDB_TYPE_PATH_HASH;
         else
             return -1; /* can't be stored in old RDB */
+    case OBJ_ZVSET: return RDB_TYPE_ZVSET;
     case OBJ_MODULE: return RDB_TYPE_MODULE_2;
     default: serverPanic("Unknown object type");
     }
@@ -1251,6 +1254,27 @@ ssize_t rdbSaveObject(rio *rdb, robj *o, robj *key, int dbid, unsigned char rdbt
             hashTypeResetIterator(&fields);
         }
         raxStop(&paths);
+    } else if (objectGetType(o) == OBJ_ZVSET) {
+        /* Save a zvset value: dimensions + (member, vector) pairs. */
+        zvset *zs = objectGetVal(o);
+        if ((n = rdbSaveLen(rdb, zvsetLength(zs))) == -1) return -1;
+        nwritten += n;
+        if ((n = rdbSaveLen(rdb, zs->dimensions)) == -1) return -1;
+        nwritten += n;
+        zvsetIterator iter;
+        zvsetInitIterator(&iter, zs);
+        const_sds item;
+        while ((item = zvsetNext(&iter)) != NULL) {
+            size_t member_len;
+            const char *member = zvItemMember(item, &member_len);
+            uint8_t dims = zvItemDimensions(item);
+            if ((n = rdbSaveRawString(rdb, (unsigned char *)member, member_len)) == -1) return -1;
+            nwritten += n;
+            for (int i = 0; i < dims; i++) {
+                if ((n = rdbSaveBinaryDoubleValue(rdb, zvItemScoreAt(item, (uint8_t)i))) == -1) return -1;
+                nwritten += n;
+            }
+        }
     } else if (objectGetType(o) == OBJ_MODULE) {
         /* Save a module-specific value. */
         ValkeyModuleIO io;
@@ -2649,6 +2673,51 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error, int rd
                 path_hash->num_fields++;
             }
         }
+    } else if (rdbtype == RDB_TYPE_ZVSET) {
+        uint64_t zvlen = rdbLoadLen(rdb, NULL);
+        if (zvlen == RDB_LENERR) return NULL;
+        uint64_t dimslen = rdbLoadLen(rdb, NULL);
+        if (dimslen == RDB_LENERR || dimslen == 0 || dimslen > ZVSET_MAX_DIMENSIONS) {
+            rdbReportCorruptRDB("Invalid zvset dimension %llu", (unsigned long long)dimslen);
+            return NULL;
+        }
+        if (zvlen == 0) goto emptykey;
+        zvset *zs = zvsetCreateSized((uint8_t)dimslen, zvlen);
+        o = createZvsetObjectFrom(zs);
+        if (!zvsetTryExpand(zs, zvlen)) {
+            rdbReportCorruptRDB("OOM in hashtableTryExpand %llu", (unsigned long long)zvlen);
+            decrRefCount(o);
+            return NULL;
+        }
+        /* One score buffer for every member. */
+        zvScore *score = zvScoreCreate((uint8_t)dimslen);
+        while (zvlen--) {
+            sds member = rdbGenericLoadStringObject(rdb, RDB_LOAD_SDS, NULL);
+            int ok = member != NULL;
+            for (uint64_t i = 0; ok && i < dimslen; i++) {
+                if (rdbLoadBinaryDoubleValue(rdb, &score->values[i]) == -1) {
+                    ok = 0;
+                } else if (isnan(score->values[i])) {
+                    rdbReportCorruptRDB("Zvset with NAN score detected");
+                    ok = 0;
+                } else if (score->values[i] == 0.0) {
+                    score->values[i] = 0.0; /* -0 is stored as +0. */
+                }
+            }
+            sds item = ok ? zvItemCreate(score, member, sdslen(member)) : NULL;
+            sdsfree(member);
+            if (ok && !zvsetTryInsert(zs, item)) {
+                rdbReportCorruptRDB("Duplicate zvset fields detected");
+                sdsfree(item);
+                ok = 0;
+            }
+            if (!ok) {
+                zvScoreFree(score);
+                decrRefCount(o);
+                return NULL;
+            }
+        }
+        zvScoreFree(score);
     } else if (rdbtype == RDB_TYPE_LIST_QUICKLIST || rdbtype == RDB_TYPE_LIST_QUICKLIST_2) {
         if ((len = rdbLoadLen(rdb, NULL)) == RDB_LENERR) return NULL;
         if (len == 0) goto emptykey;
