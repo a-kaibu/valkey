@@ -118,11 +118,20 @@ int zvScoreIncrement(zvScore *result, const zvScore *base, const zvScore *delta)
 
 /* Format a parsed vector as "v0#v1#..." into buf (at least
  * ZVSET_SCORE_BUFLEN bytes). Returns the formatted length. */
+/* Format one component like ZSET replies (d2string): integral values use
+ * the much faster integer printer, everything else the shortest
+ * round-trip representation. -0 never reaches here (canonicalized). */
+static inline size_t zvFormatDouble(double v, char *buf) {
+    long long ll;
+    if (double2ll(v, &ll)) return ll2string(buf, 21, ll);
+    return fpconv_dtoa(v, buf);
+}
+
 size_t zvScoreFormatBuf(const zvScore *score, char *buf) {
     size_t len = 0;
     for (int i = 0; i < score->len; i++) {
         if (i > 0) buf[len++] = '#';
-        len += fpconv_dtoa(score->values[i], buf + len);
+        len += zvFormatDouble(score->values[i], buf + len);
     }
     return len;
 }
@@ -540,7 +549,7 @@ int zvItemScoreEquals(const_sds item, const zvScore *score) {
 }
 
 /* Format a packed item's vector as "v0#v1#..." into buf (at least
- * ZVSET_SCORE_BUFLEN bytes). Uses fpconv_dtoa like ZSET replies. */
+ * ZVSET_SCORE_BUFLEN bytes), formatted like ZSET replies. */
 size_t zvItemFormatScoreBuf(const_sds item, char *buf) {
     uint8_t dims = (uint8_t)item[0];
     size_t len = 0;
@@ -548,7 +557,7 @@ size_t zvItemFormatScoreBuf(const_sds item, char *buf) {
         uint64_t sortable;
         memcpy(&sortable, item + 1 + (size_t)i * 8, sizeof(sortable));
         if (i > 0) buf[len++] = '#';
-        len += fpconv_dtoa(zvSortableToScore(sortable), buf + len);
+        len += zvFormatDouble(zvSortableToScore(sortable), buf + len);
     }
     return len;
 }

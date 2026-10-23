@@ -15,20 +15,72 @@
 
 #include <strings.h>
 
-/* Reply with a packed item's vector score without a temporary SDS. */
+/* Members up to this length are emitted in the same protocol chunk as
+ * their score; longer ones are appended separately. */
+#define ZV_REPLY_INLINE_MEMBER 512
+/* Room for "*2\r\n", two bulk headers, an inline member and a score. */
+#define ZV_REPLY_CHUNK (4 + 2 * 24 + ZV_REPLY_INLINE_MEMBER + ZVSET_SCORE_BUFLEN + 4)
+
+/* Write the bulk string header "$<len>\r\n" at p. Returns its length. */
+static size_t zvWriteBulkHeader(char *p, size_t len) {
+    size_t n = 1;
+    p[0] = '$';
+    n += (size_t)ull2string(p + 1, 21, len);
+    p[n++] = '\r';
+    p[n++] = '\n';
+    return n;
+}
+
+/* Write buf[0..len) as a complete bulk string at p. Returns its length. */
+static size_t zvWriteBulk(char *p, const char *buf, size_t len) {
+    size_t n = zvWriteBulkHeader(p, len);
+    memcpy(p + n, buf, len);
+    n += len;
+    p[n++] = '\r';
+    p[n++] = '\n';
+    return n;
+}
+
+/* Reply with a packed item's vector score as one protocol chunk. */
 static void addReplyZvScore(client *c, const_sds item) {
-    char buf[ZVSET_SCORE_BUFLEN];
-    addReplyBulkCBuffer(c, buf, zvItemFormatScoreBuf(item, buf));
+    char score[ZVSET_SCORE_BUFLEN];
+    char chunk[ZVSET_SCORE_BUFLEN + 32];
+    size_t len = zvItemFormatScoreBuf(item, score);
+    addReplyProto(c, chunk, zvWriteBulk(chunk, score, len));
+}
+
+/* Reply with one element: the member, plus its score when withscores is
+ * set, optionally nested as a two element array. The whole element is
+ * appended as a single protocol chunk, which is what dominates the cost
+ * of large range replies. */
+static void addReplyZvPair(client *c, const_sds item, int withscores, int nested) {
+    size_t member_len;
+    const char *member = zvItemMember(item, &member_len);
+    if (member_len > ZV_REPLY_INLINE_MEMBER) {
+        if (nested) addReplyArrayLen(c, 2);
+        addReplyBulkCBuffer(c, member, member_len);
+        if (withscores) addReplyZvScore(c, item);
+        return;
+    }
+    char chunk[ZV_REPLY_CHUNK];
+    size_t n = 0;
+    if (nested) {
+        memcpy(chunk, "*2\r\n", 4);
+        n = 4;
+    }
+    n += zvWriteBulk(chunk + n, member, member_len);
+    if (withscores) {
+        char score[ZVSET_SCORE_BUFLEN];
+        size_t len = zvItemFormatScoreBuf(item, score);
+        n += zvWriteBulk(chunk + n, score, len);
+    }
+    addReplyProto(c, chunk, n);
 }
 
 /* Reply with one range element: member, plus the score with WITHSCORES.
  * RESP3 nests [member, score] pairs like ZRANGE; RESP2 stays flat. */
 static void addReplyZvElement(client *c, const_sds item, int withscores) {
-    size_t member_len;
-    const char *member = zvItemMember(item, &member_len);
-    if (withscores && c->resp > 2) addReplyArrayLen(c, 2);
-    addReplyBulkCBuffer(c, member, member_len);
-    if (withscores) addReplyZvScore(c, item);
+    addReplyZvPair(c, item, withscores, withscores && c->resp > 2);
 }
 
 /* ZVADD key [NX|XX] [GT|LT] [CH] [INCR] score member [score member ...]
@@ -881,11 +933,7 @@ void genericZvpopCommand(client *c,
             zvPopInitialReply(c, emitkey, use_nested_array, rangelen, key);
         }
 
-        size_t member_len;
-        const char *member = zvItemMember(item, &member_len);
-        if (use_nested_array) addReplyArrayLen(c, 2);
-        addReplyBulkCBuffer(c, member, member_len);
-        addReplyZvScore(c, item);
+        addReplyZvPair(c, item, 1, use_nested_array);
         sdsfree(item);
         ++result_count;
     } while (--rangelen);
