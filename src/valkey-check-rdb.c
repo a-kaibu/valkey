@@ -415,8 +415,8 @@ void computeDatasetProfile(int dbid, robj *keyobj, robj *o, long long expiretime
         raxStop(&paths);
         statsRecordCount(raxSize(path_hash->index), stats);
     } else if (o->type == OBJ_ZVSET) {
-        /* PoC: count only, sizes approximated via hashtable walk is skipped. */
-        statsRecordCount(hashtableSize(((zvset *)objectGetVal(o))->ht), stats);
+        /* PoC: count only, element sizes are not recorded. */
+        statsRecordCount(zvsetLength(objectGetVal(o)), stats);
     } else if (o->type == OBJ_MODULE) {
         statsRecordCount(1, stats);
     } else {

@@ -84,7 +84,28 @@ storage representationと分離。将来的なprotocol変更はparser差し替�
 - `ZVADD` は全pairをparse・validateしてからmutate (atomicity)。
 - dimensionは `1 <= d <= 255` (`uint8_t`)。
 
-## ownership rule
+## encoding (compact / btree)
+
+`zvset` 構造体が自分の表現を持つ (`zvsetIsCompact()`、robjのencodingは常に
+`OBJ_ENCODING_BTREE`)。`OBJECT ENCODING` は `compact` / `btree` を返す。
+
+- compact: packed itemのソート済み配列 + memberごとの16bitハッシュタグ
+  (1 allocationに `[sds × capacity][uint16 tag × capacity]`)。hashtable・
+  fbtreeなし。rank系はbinary search、member lookupはtag配列を線形走査し
+  tag一致時だけitemを参照。
+- 閾値はZSETのlistpackと同じ `zset-max-listpack-entries` (128) /
+  `zset-max-listpack-value` (64)。超えた時点でbtreeへ変換 (item pointerは
+  そのまま移すのでcopyなし)。in placeでの逆変換はしない。
+- STORE系 (`ZVRANGESTORE`, `ZVUNIONSTORE` 等) とRDB loadは結果サイズで
+  最初からencodingを選ぶ。INTER/DIFFSTOREは結果が小さければcompactへ戻す。
+- encoding差は `src/zvset.c` の container API (`zvsetFind`, `zvsetRankOf`,
+  `zvsetGetAtRank`, `zvsetPop`, `zvsetDeleteRangeByRank`, `zvsetIterator`
+  など) に閉じており、t_zvset.c・rdb・aof・digest・scanはencodingを見ない
+  (SCANとdefragのみcompact用の分岐あり)。
+- テストは `tests/unit/type/zvset.tcl` 全体を両encodingで実行し、
+  compact/btreeの差分ファジングも行う。
+
+## ownership rule (btree)
 
 ZSET(BTREE)と同じ設計。hashtable entryはpacked fbtree itemへの
 non-owning pointer (同一pointer)。
@@ -253,7 +274,6 @@ dim-first/lastで大差なし (d16: 1.8ms vs 4.1ms、要再測定)。
 
 実装済みのため当初のPoC未対応項目はほぼ解消。残るもの:
 
-- listpack/compact encoding (全サイズfbtreeのまま)。
 - per-dimension ASC/DESC、多次元filterのsecondary index
   (`ZVQUERY` は先頭次元の範囲を既存treeで絞り込む)。
 - `RDB_TYPE_ZVSET=24` の正式type ID・RDB version対応の決定

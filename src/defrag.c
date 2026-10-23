@@ -466,6 +466,11 @@ static void defragZvsetItemCallback(sds old_item, sds new_item, void *privdata) 
 static void scanLaterZvset(robj *ob, unsigned long *cursor) {
     serverAssert(ob->type == OBJ_ZVSET && ob->encoding == OBJ_ENCODING_BTREE);
     zvset *zs = (zvset *)objectGetVal(ob);
+    /* Compact zvsets are defragmented in one pass by defragZvset(). */
+    if (zvsetIsCompact(zs)) {
+        *cursor = 0;
+        return;
+    }
     *cursor = fbtreeDefragScan(zs->tree, *cursor, defragZvsetItemCallback, zs->ht, activeDefragAlloc);
 }
 
@@ -477,6 +482,17 @@ static void defragZvset(robj *ob) {
     if ((newzs = activeDefragAlloc(zs))) {
         objectSetVal(ob, newzs);
         zs = newzs;
+    }
+
+    if (zvsetIsCompact(zs)) {
+        /* At most zset-max-listpack-entries items: one pass. */
+        sds *newitems;
+        if (zs->items && (newitems = activeDefragAlloc(zs->items))) zs->items = newitems;
+        for (uint32_t i = 0; i < zs->count; i++) {
+            sds newitem;
+            if ((newitem = activeDefragSds(zs->items[i]))) zs->items[i] = newitem;
+        }
+        return;
     }
 
     hashtable *newtable;

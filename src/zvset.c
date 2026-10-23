@@ -202,22 +202,420 @@ sds zvBoundSuccessor(const_sds bound) {
     return succ;
 }
 
-void zvScoreRanks(zvset *zs, const_sds lower, const_sds upper, unsigned long *lo, unsigned long *hi) {
-    unsigned long len = fbtreeLength(zs->tree);
-    fbtreeIterator it;
-    if (lower != NULL) {
-        fbtreeInitIterator(&it, zs->tree);
-        long rank = fbtreeSeekToValue(lower, &it);
-        *lo = rank < 0 ? 0 : (unsigned long)rank;
-    } else {
-        *lo = 0;
+/* --- Container: compact and btree encodings ---
+ *
+ * Everything below this section reaches the items only through these
+ * helpers, so the rest of the type is encoding independent. */
+
+static inline int zvsetFitsCompact(unsigned long count, size_t member_len) {
+    return count <= server.zset_max_listpack_entries && member_len <= server.zset_max_listpack_value;
+}
+
+static inline size_t zvItemMemberLen(const_sds item) {
+    return sdslen(item) - 1 - (size_t)(uint8_t)item[0] * 8;
+}
+
+/* Compact storage is one allocation of capacity slots: the item
+ * pointers, followed by a 16-bit hash tag of each item's member. Member
+ * lookups scan the contiguous tags and only dereference items whose tag
+ * matches, instead of chasing every item pointer. */
+#define ZV_SLOT_SIZE (sizeof(sds) + sizeof(uint16_t))
+
+static inline uint16_t *zvCompactTags(const zvset *zs) {
+    return (uint16_t *)(zs->items + zs->capacity);
+}
+
+/* FNV-1a, folded to 16 bits. */
+static inline uint16_t zvMemberTag(const char *member, size_t len) {
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < len; i++) h = (h ^ (uint8_t)member[i]) * 16777619u;
+    return (uint16_t)(h ^ (h >> 16));
+}
+
+static inline uint16_t zvItemTag(const_sds item) {
+    size_t len;
+    const char *member = zvItemMember(item, &len);
+    return zvMemberTag(member, len);
+}
+
+/* Reallocate to room for at least want slots (want >= count), keeping
+ * the tags right after the pointers. */
+static void zvCompactResize(zvset *zs, uint32_t want) {
+    if (want == 0) {
+        zfree(zs->items);
+        zs->items = NULL;
+        zs->capacity = 0;
+        return;
     }
-    if (upper != NULL) {
-        fbtreeInitIterator(&it, zs->tree);
-        long rank = fbtreeSeekToValue(upper, &it);
-        *hi = rank < 0 ? 0 : (unsigned long)rank;
+    size_t tags_bytes = sizeof(uint16_t) * zs->count;
+    size_t tags_at = sizeof(sds) * zs->capacity;
+    if (want < zs->capacity) {
+        /* Shrinking: move the tags down before the tail is cut off. */
+        memmove((char *)zs->items + sizeof(sds) * want, (char *)zs->items + tags_at, tags_bytes);
+        tags_at = sizeof(sds) * want;
+    }
+    size_t usable;
+    char *buf = zrealloc_usable(zs->items, ZV_SLOT_SIZE * want, &usable);
+    uint32_t capacity = (uint32_t)(usable / ZV_SLOT_SIZE);
+    memmove(buf + sizeof(sds) * capacity, buf + tags_at, tags_bytes);
+    zs->items = (sds *)buf;
+    zs->capacity = capacity;
+}
+
+/* First index whose item is >= key, in the tree's sdscmp() order. */
+static unsigned long zvCompactLowerBound(const zvset *zs, const char *key, size_t keylen) {
+    unsigned long lo = 0, hi = zs->count;
+    while (lo < hi) {
+        unsigned long mid = lo + (hi - lo) / 2;
+        const_sds item = zs->items[mid];
+        if (zvLexMemberCompare(item, sdslen(item), key, keylen) < 0)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    return lo;
+}
+
+/* Index of the item holding member, or -1. */
+static long zvCompactFindMember(const zvset *zs, const char *member, size_t len) {
+    const uint16_t *tags = zvCompactTags(zs);
+    uint16_t tag = zvMemberTag(member, len);
+    /* Items share the key's score width, so the length check rejects most
+     * tag collisions without a memcmp. */
+    size_t prefix = 1 + (size_t)zs->dimensions * 8;
+    size_t itemlen = prefix + len;
+    for (uint32_t i = 0; i < zs->count; i++) {
+        if (tags[i] != tag) continue;
+        const_sds item = zs->items[i];
+        if (sdslen(item) == itemlen && memcmp(item + prefix, member, len) == 0) return (long)i;
+    }
+    return -1;
+}
+
+static void zvCompactInsertAt(zvset *zs, unsigned long idx, sds item) {
+    if (zs->count == zs->capacity) zvCompactResize(zs, zs->count + 1);
+    uint16_t *tags = zvCompactTags(zs);
+    memmove(&zs->items[idx + 1], &zs->items[idx], sizeof(sds) * (zs->count - idx));
+    memmove(&tags[idx + 1], &tags[idx], sizeof(uint16_t) * (zs->count - idx));
+    zs->items[idx] = item;
+    tags[idx] = zvItemTag(item);
+    zs->count++;
+}
+
+/* Drop n slots at idx (the items are not freed). */
+static void zvCompactRemoveAt(zvset *zs, unsigned long idx, unsigned long n) {
+    uint16_t *tags = zvCompactTags(zs);
+    memmove(&zs->items[idx], &zs->items[idx + n], sizeof(sds) * (zs->count - idx - n));
+    memmove(&tags[idx], &tags[idx + n], sizeof(uint16_t) * (zs->count - idx - n));
+    zs->count -= (uint32_t)n;
+    if (zs->count < zs->capacity / 2) zvCompactResize(zs, zs->count);
+}
+
+/* Take ownership of count sorted items. */
+static void zvCompactAdopt(zvset *zs, sds *items, uint32_t count) {
+    zs->items = NULL;
+    zs->count = zs->capacity = 0;
+    if (count == 0) return;
+    zvCompactResize(zs, count);
+    memcpy(zs->items, items, sizeof(sds) * count);
+    zs->count = count;
+    uint16_t *tags = zvCompactTags(zs);
+    for (uint32_t i = 0; i < count; i++) tags[i] = zvItemTag(items[i]);
+}
+
+static void zvsetConvertToBtree(zvset *zs) {
+    serverAssert(zvsetIsCompact(zs));
+    hashtable *ht = hashtableCreate(&zvsetHashtableType);
+    fbtreeIndex *tree = fbtreeCreate();
+    if (zs->count) hashtableExpand(ht, zs->count);
+    /* Ascending inserts take fbtree's append path and leave full leaves. */
+    for (uint32_t i = 0; i < zs->count; i++) {
+        sds inserted = fbtreeInsert(tree, zs->items[i]);
+        serverAssert(hashtableAdd(ht, inserted));
+    }
+    zfree(zs->items);
+    zs->items = NULL;
+    zs->count = zs->capacity = 0;
+    zs->ht = ht;
+    zs->tree = tree;
+}
+
+static void zvsetConvertToCompact(zvset *zs) {
+    serverAssert(!zvsetIsCompact(zs));
+    unsigned long len = fbtreeLength(zs->tree);
+    sds *items = len ? zmalloc(sizeof(sds) * len) : NULL;
+    /* PopMin hands item ownership over, in order. */
+    for (unsigned long i = 0; i < len; i++) items[i] = fbtreePopMin(zs->tree);
+    hashtableRelease(zs->ht);
+    fbtreeFree(zs->tree);
+    zs->ht = NULL;
+    zs->tree = NULL;
+    zvCompactAdopt(zs, items, (uint32_t)len);
+    zfree(items);
+}
+
+zvset *zvsetCreate(uint8_t dimensions) {
+    zvset *zs = zcalloc(sizeof(*zs));
+    zs->dimensions = dimensions;
+    return zs;
+}
+
+zvset *zvsetCreateSized(uint8_t dimensions, unsigned long size_hint) {
+    zvset *zs = zvsetCreate(dimensions);
+    if (!zvsetFitsCompact(size_hint, 0)) zvsetConvertToBtree(zs);
+    return zs;
+}
+
+void zvsetRelease(zvset *zs) {
+    if (zvsetIsCompact(zs)) {
+        for (uint32_t i = 0; i < zs->count; i++) sdsfree(zs->items[i]);
+        zfree(zs->items);
     } else {
-        *hi = len;
+        /* The hashtable holds non-owning pointers; fbtree owns the items. */
+        hashtableRelease(zs->ht);
+        fbtreeFree(zs->tree);
+    }
+    zfree(zs);
+}
+
+const char *zvsetEncodingName(const zvset *zs) {
+    return zvsetIsCompact(zs) ? "compact" : "btree";
+}
+
+void zvsetCompactIfFits(zvset *zs) {
+    if (zvsetIsCompact(zs) || !zvsetFitsCompact(fbtreeLength(zs->tree), 0)) return;
+    fbtreeIterator it;
+    fbtreeInitIterator(&it, zs->tree);
+    const_sds item;
+    while ((item = fbtreeNext(&it)) != NULL) {
+        if (!zvsetFitsCompact(0, zvItemMemberLen(item))) return;
+    }
+    zvsetConvertToCompact(zs);
+}
+
+int zvsetTryExpand(zvset *zs, unsigned long size) {
+    if (zvsetIsCompact(zs)) return 1;
+    return hashtableTryExpand(zs->ht, size);
+}
+
+unsigned long zvsetLength(const zvset *zs) {
+    return zvsetIsCompact(zs) ? zs->count : fbtreeLength(zs->tree);
+}
+
+void zvsetInsertNew(zvset *zs, sds item) {
+    if (zvsetIsCompact(zs)) {
+        if (zvsetFitsCompact((unsigned long)zs->count + 1, zvItemMemberLen(item))) {
+            zvCompactInsertAt(zs, zvCompactLowerBound(zs, item, sdslen(item)), item);
+            return;
+        }
+        zvsetConvertToBtree(zs);
+    }
+    sds inserted = fbtreeInsert(zs->tree, item);
+    serverAssert(hashtableAdd(zs->ht, inserted));
+}
+
+int zvsetTryInsert(zvset *zs, sds item) {
+    if (zvsetFindItemMember(zs, item) != NULL) return 0;
+    zvsetInsertNew(zs, item);
+    return 1;
+}
+
+static int zvItemSdsCompare(const void *a, const void *b) {
+    return sdscmp(*(const sds *)a, *(const sds *)b);
+}
+
+zvset *zvsetFromHashtable(uint8_t dimensions, hashtable *ht) {
+    zvset *zs = zvsetCreate(dimensions);
+    unsigned long len = hashtableSize(ht);
+    int compact = zvsetFitsCompact(len, 0);
+    sds *items = (compact && len) ? zmalloc(sizeof(sds) * len) : NULL;
+    if (compact) {
+        hashtableIterator iter;
+        hashtableInitIterator(&iter, ht, 0);
+        void *next;
+        unsigned long i = 0;
+        while (hashtableNext(&iter, &next)) {
+            if (!zvsetFitsCompact(0, zvItemMemberLen(next))) compact = 0;
+            items[i++] = next;
+        }
+        hashtableCleanupIterator(&iter);
+    }
+    if (compact) {
+        if (len) qsort(items, len, sizeof(sds), zvItemSdsCompare);
+        hashtableRelease(ht);
+        zvCompactAdopt(zs, items, (uint32_t)len);
+        zfree(items);
+        return zs;
+    }
+    zfree(items);
+    /* Keep the hashtable: only the tree needs building. */
+    zs->ht = ht;
+    zs->tree = fbtreeCreate();
+    hashtableIterator iter;
+    hashtableInitIterator(&iter, ht, 0);
+    void *next;
+    while (hashtableNext(&iter, &next)) serverAssert(fbtreeInsert(zs->tree, next) == next);
+    hashtableCleanupIterator(&iter);
+    return zs;
+}
+
+void *zvsetFind(zvset *zs, sds member) {
+    if (zvsetIsCompact(zs)) {
+        long idx = zvCompactFindMember(zs, member, sdslen(member));
+        return idx < 0 ? NULL : zs->items[idx];
+    }
+    void *entry = NULL;
+    zsetMarkLookupKey(member);
+    hashtableFind(zs->ht, member, &entry);
+    zsetUnmarkLookupKey(member);
+    return entry;
+}
+
+const_sds zvsetFindItemMember(zvset *zs, const_sds item) {
+    if (zvsetIsCompact(zs)) {
+        size_t len;
+        const char *member = zvItemMember(item, &len);
+        long idx = zvCompactFindMember(zs, member, len);
+        return idx < 0 ? NULL : zs->items[idx];
+    }
+    /* Packed items hash and compare by their member. */
+    void *found;
+    return hashtableFind(zs->ht, item, &found) ? found : NULL;
+}
+
+long zvsetRankOf(zvset *zs, const_sds item) {
+    if (zvsetIsCompact(zs)) {
+        unsigned long idx = zvCompactLowerBound(zs, item, sdslen(item));
+        return (idx < zs->count && zs->items[idx] == item) ? (long)idx : -1;
+    }
+    return fbtreeGetIndexOfItem(zs->tree, item);
+}
+
+const_sds zvsetGetAtRank(zvset *zs, unsigned long rank) {
+    if (zvsetIsCompact(zs)) return rank < zs->count ? zs->items[rank] : NULL;
+    return fbtreeGetAtRank(zs->tree, rank);
+}
+
+static const_sds zvsetPeek(zvset *zs, int max) {
+    if (zvsetIsCompact(zs)) {
+        if (zs->count == 0) return NULL;
+        return zs->items[max ? zs->count - 1 : 0];
+    }
+    return max ? fbtreePeekMax(zs->tree) : fbtreePeekMin(zs->tree);
+}
+
+sds zvsetPop(zvset *zs, int max) {
+    if (zvsetIsCompact(zs)) {
+        if (zs->count == 0) return NULL;
+        unsigned long idx = max ? zs->count - 1 : 0;
+        sds item = zs->items[idx];
+        zvCompactRemoveAt(zs, idx, 1);
+        return item;
+    }
+    sds item = max ? fbtreePopMax(zs->tree) : fbtreePopMin(zs->tree);
+    /* Drop the hashtable reference while the item is still alive. */
+    if (item) serverAssert(hashtableDelete(zs->ht, item));
+    return item;
+}
+
+/* fbtree range deletion callback: drop the hashtable reference while the
+ * item is still alive (fbtree frees it afterwards). */
+static void zvRangeDeleteCallback(sds item, void *ctx) {
+    zvset *zs = ctx;
+    serverAssert(hashtableDelete(zs->ht, item));
+}
+
+unsigned long zvsetDeleteRangeByRank(zvset *zs, unsigned long lo, unsigned long hi) {
+    unsigned long len = zvsetLength(zs);
+    if (hi > len) hi = len;
+    if (lo >= hi) return 0;
+    if (zvsetIsCompact(zs)) {
+        for (unsigned long i = lo; i < hi; i++) sdsfree(zs->items[i]);
+        zvCompactRemoveAt(zs, lo, hi - lo);
+        return hi - lo;
+    }
+    return fbtreeDeleteRangeByRank(zs->tree, lo, hi - 1, zvRangeDeleteCallback, zs);
+}
+
+void zvsetPauseAutoShrink(zvset *zs) {
+    if (!zvsetIsCompact(zs)) hashtablePauseAutoShrink(zs->ht);
+}
+
+void zvsetResumeAutoShrink(zvset *zs) {
+    if (!zvsetIsCompact(zs)) hashtableResumeAutoShrink(zs->ht);
+}
+
+size_t zvsetAllocSize(zvset *zs, size_t sample_size) {
+    size_t asize = zmalloc_size(zs), elesize = 0, samples = 0;
+    unsigned long len = zvsetLength(zs);
+    if (zvsetIsCompact(zs)) {
+        if (zs->items) asize += zmalloc_size(zs->items);
+    } else {
+        asize += fbtreeEstimateStructureMemory(zs->tree) + hashtableMemUsage(zs->ht);
+    }
+    zvsetIterator it;
+    zvsetInitIterator(&it, zs);
+    const_sds item;
+    while (samples < sample_size && (item = zvsetNext(&it)) != NULL) {
+        elesize += sdsAllocSize((sds)item);
+        samples++;
+    }
+    if (samples) asize += (double)elesize / samples * len;
+    return asize;
+}
+
+void zvsetInitIterator(zvsetIterator *it, zvset *zs) {
+    it->zs = zs;
+    it->pos = 0;
+    it->fresh = 1;
+    if (!zvsetIsCompact(zs)) fbtreeInitIterator(&it->it, zs->tree);
+}
+
+void zvsetSeekToRank(zvsetIterator *it, unsigned long rank) {
+    if (!zvsetIsCompact(it->zs)) {
+        fbtreeSeekToRank(&it->it, rank);
+        return;
+    }
+    it->pos = rank < it->zs->count ? rank : it->zs->count;
+    it->fresh = 0;
+}
+
+const_sds zvsetNext(zvsetIterator *it) {
+    if (!zvsetIsCompact(it->zs)) return fbtreeNext(&it->it);
+    it->fresh = 0;
+    return it->pos < it->zs->count ? it->zs->items[it->pos++] : NULL;
+}
+
+const_sds zvsetPrev(zvsetIterator *it) {
+    if (!zvsetIsCompact(it->zs)) return fbtreePrev(&it->it);
+    if (it->fresh) {
+        it->pos = it->zs->count;
+        it->fresh = 0;
+    }
+    return it->pos > 0 ? it->zs->items[--it->pos] : NULL;
+}
+
+void zvScoreRanks(zvset *zs, const_sds lower, const_sds upper, unsigned long *lo, unsigned long *hi) {
+    unsigned long len = zvsetLength(zs);
+    if (zvsetIsCompact(zs)) {
+        *lo = lower ? zvCompactLowerBound(zs, lower, sdslen(lower)) : 0;
+        *hi = upper ? zvCompactLowerBound(zs, upper, sdslen(upper)) : len;
+    } else {
+        fbtreeIterator it;
+        if (lower != NULL) {
+            fbtreeInitIterator(&it, zs->tree);
+            long rank = fbtreeSeekToValue(lower, &it);
+            *lo = rank < 0 ? 0 : (unsigned long)rank;
+        } else {
+            *lo = 0;
+        }
+        if (upper != NULL) {
+            fbtreeInitIterator(&it, zs->tree);
+            long rank = fbtreeSeekToValue(upper, &it);
+            *hi = rank < 0 ? 0 : (unsigned long)rank;
+        } else {
+            *hi = len;
+        }
     }
     if (*lo > len) *lo = len;
     if (*hi > len) *hi = len;
@@ -227,16 +625,16 @@ void zvScoreRanks(zvset *zs, const_sds lower, const_sds upper, unsigned long *lo
 void zvIterateRange(zvset *zs, unsigned long lo, unsigned long hi, int reverse, long offset, long count, zvRangeEmit emit, void *ctx) {
     if (lo >= hi) return;
     if (offset < 0) offset = 0;
-    fbtreeIterator it;
-    fbtreeInitIterator(&it, zs->tree);
+    zvsetIterator it;
+    zvsetInitIterator(&it, zs);
     if (!reverse) {
         unsigned long start = lo + (unsigned long)offset;
         if (start >= hi) return;
         unsigned long n = hi - start;
         if (count >= 0 && n > (unsigned long)count) n = (unsigned long)count;
-        if (start > 0) fbtreeSeekToRank(&it, start);
+        if (start > 0) zvsetSeekToRank(&it, start);
         for (unsigned long i = 0; i < n; i++) {
-            const_sds item = fbtreeNext(&it);
+            const_sds item = zvsetNext(&it);
             if (item == NULL) break;
             emit(ctx, item);
         }
@@ -246,9 +644,9 @@ void zvIterateRange(zvset *zs, unsigned long lo, unsigned long hi, int reverse, 
         unsigned long n = (unsigned long)(start - (long)lo) + 1;
         if (count >= 0 && n > (unsigned long)count) n = (unsigned long)count;
         /* After SeekToRank(r), Prev() yields rank r-1. */
-        fbtreeSeekToRank(&it, (unsigned long)start + 1);
+        zvsetSeekToRank(&it, (unsigned long)start + 1);
         for (unsigned long i = 0; i < n; i++) {
-            const_sds item = fbtreePrev(&it);
+            const_sds item = zvsetPrev(&it);
             if (item == NULL) break;
             emit(ctx, item);
         }
@@ -305,16 +703,16 @@ static int zvItemPrefixCompare(const_sds a, const_sds b) {
 }
 
 int zvsetUniformVector(zvset *zs) {
-    if (fbtreeLength(zs->tree) <= 1) return 1;
-    const_sds first = fbtreePeekMin(zs->tree);
-    const_sds last = fbtreePeekMax(zs->tree);
+    if (zvsetLength(zs) <= 1) return 1;
+    const_sds first = zvsetPeek(zs, 0);
+    const_sds last = zvsetPeek(zs, 1);
     serverAssert(first != NULL && last != NULL);
     if (zvItemPrefixCompare(first, last) != 0) return 0;
     return 1;
 }
 
 sds zvLexSeekKey(zvset *zs, const char *member, size_t member_len) {
-    const_sds first = fbtreePeekMin(zs->tree);
+    const_sds first = zvsetPeek(zs, 0);
     serverAssert(first != NULL);
     uint8_t dims = (uint8_t)first[0];
     size_t prefix = 1 + (size_t)dims * 8;
@@ -421,7 +819,7 @@ long zvsetScoreRangeCount(zvset *zs, zvScoreBound *minb, zvScoreBound *maxb) {
     sds lower, upper;
     unsigned long count = 0;
     if (zvBuildScoreInterval(minb, maxb, &lower, &upper)) {
-        if (lower && upper) {
+        if (lower && upper && !zvsetIsCompact(zs)) {
             count = fbtreeCountRangeByValue(zs->tree, lower, upper, 0, 1);
         } else {
             unsigned long lo, hi;
@@ -589,24 +987,51 @@ hashtableType zvsetHashtableType = {
 
 /* --- Core operations (modelled on zsetAdd BTREE branch) --- */
 
-void *zvsetFind(zvset *zs, sds member) {
-    void *entry = NULL;
+/* Position of a member found by zvsetLookup(): the hashtable slot for
+ * btree, the array index for compact. */
+typedef struct zvSlot {
+    void **ref;
+    long idx;
+} zvSlot;
+
+static const_sds zvsetLookup(zvset *zs, sds member, zvSlot *slot) {
+    if (zvsetIsCompact(zs)) {
+        slot->idx = zvCompactFindMember(zs, member, sdslen(member));
+        return slot->idx < 0 ? NULL : zs->items[slot->idx];
+    }
     zsetMarkLookupKey(member);
-    hashtableFind(zs->ht, member, &entry);
+    slot->ref = hashtableFindRef(zs->ht, member);
     zsetUnmarkLookupKey(member);
-    return entry;
+    return slot->ref ? *slot->ref : NULL;
 }
 
-/* Replace the item referenced by the hashtable slot with a new score.
- * The old item is deleted from the tree before the new one is inserted,
- * then the slot pointer is updated. Returns the inserted item. */
-static sds zvsetReplaceItem(zvset *zs, void **item_ref, const zvScore *score, sds member) {
-    const_sds old_item = *item_ref;
+/* Replace the item at slot with one holding the same member and a new
+ * score, keeping the order. The old item is freed. */
+static void zvsetReplaceAt(zvset *zs, zvSlot *slot, const zvScore *score, sds member) {
     sds new_item = zvItemCreate(score, member, sdslen(member));
-    serverAssert(fbtreeDelete(zs->tree, old_item));
-    sds inserted = fbtreeInsert(zs->tree, new_item);
-    *item_ref = inserted;
-    return inserted;
+    if (zvsetIsCompact(zs)) {
+        unsigned long i = (unsigned long)slot->idx;
+        sds old_item = zs->items[i];
+        uint16_t *tags = zvCompactTags(zs);
+        uint16_t tag = tags[i];
+        /* Move the slots between the old and new positions by one. */
+        unsigned long j = zvCompactLowerBound(zs, new_item, sdslen(new_item));
+        if (j > i) {
+            j--;
+            memmove(&zs->items[i], &zs->items[i + 1], sizeof(sds) * (j - i));
+            memmove(&tags[i], &tags[i + 1], sizeof(uint16_t) * (j - i));
+        } else {
+            memmove(&zs->items[j + 1], &zs->items[j], sizeof(sds) * (i - j));
+            memmove(&tags[j + 1], &tags[j], sizeof(uint16_t) * (i - j));
+        }
+        zs->items[j] = new_item;
+        tags[j] = tag;
+        sdsfree(old_item);
+        return;
+    }
+    /* fbtree frees the old item; then point the slot at the new one. */
+    serverAssert(fbtreeDelete(zs->tree, *slot->ref));
+    *slot->ref = fbtreeInsert(zs->tree, new_item);
 }
 
 /* Read the full vector of a packed item into out (len == dims). */
@@ -662,16 +1087,13 @@ int zvsetAdd(zvset *zs, const zvScore *score, sds member, int in_flags, int *out
 
     if (score->len != zs->dimensions) return C_ERR;
 
-    zsetMarkLookupKey(member);
-    void **item_ref = hashtableFindRef(zs->ht, member);
-    zsetUnmarkLookupKey(member);
-
-    if (item_ref != NULL) {
+    zvSlot slot;
+    const_sds old_item = zvsetLookup(zs, member, &slot);
+    if (old_item != NULL) {
         if (nx) {
             *out_flags |= ZVADD_OUT_NOP;
             return C_OK;
         }
-        const_sds old_item = *item_ref;
         if (zvItemScoreEquals(old_item, score)) return C_OK;
 
         /* GT/LT compare only through the first differing component. */
@@ -683,7 +1105,7 @@ int zvsetAdd(zvset *zs, const zvScore *score, sds member, int in_flags, int *out
             }
         }
 
-        zvsetReplaceItem(zs, item_ref, score, member);
+        zvsetReplaceAt(zs, &slot, score, member);
         *out_flags |= ZVADD_OUT_UPDATED;
         return C_OK;
     }
@@ -693,9 +1115,7 @@ int zvsetAdd(zvset *zs, const zvScore *score, sds member, int in_flags, int *out
         return C_OK;
     }
 
-    sds item = zvItemCreate(score, member, sdslen(member));
-    sds inserted = fbtreeInsert(zs->tree, item);
-    serverAssert(hashtableAdd(zs->ht, inserted));
+    zvsetInsertNew(zs, zvItemCreate(score, member, sdslen(member)));
     *out_flags |= ZVADD_OUT_ADDED;
     return C_OK;
 }
@@ -710,26 +1130,24 @@ int zvsetIncrBy(zvset *zs, const zvScore *delta, sds member, int in_flags, int *
 
     if (delta->len != zs->dimensions || newscore->len != zs->dimensions) return C_ERR;
 
-    zsetMarkLookupKey(member);
-    void **item_ref = hashtableFindRef(zs->ht, member);
-    zsetUnmarkLookupKey(member);
-
-    if (item_ref != NULL) {
+    zvSlot slot;
+    const_sds old_item = zvsetLookup(zs, member, &slot);
+    if (old_item != NULL) {
         if (nx) {
             *out_flags |= ZVADD_OUT_NOP;
             return C_OK;
         }
-        zvsetItemToScore(*item_ref, newscore);
+        zvsetItemToScore(old_item, newscore);
         if (zvScoreIncrement(newscore, newscore, delta) != C_OK) return C_ERR;
         /* cmp is the old score relative to the new one. */
-        int cmp = zvItemScoreCompare(*item_ref, newscore);
+        int cmp = zvItemScoreCompare(old_item, newscore);
         if ((gt && cmp >= 0) || (lt && cmp <= 0)) {
             *out_flags |= ZVADD_OUT_NOP;
             return C_OK;
         }
         /* Skip delete/insert when the result is identical. */
         if (cmp == 0) return C_OK;
-        zvsetReplaceItem(zs, item_ref, newscore, member);
+        zvsetReplaceAt(zs, &slot, newscore, member);
         *out_flags |= ZVADD_OUT_UPDATED;
         return C_OK;
     }
@@ -744,14 +1162,19 @@ int zvsetIncrBy(zvset *zs, const zvScore *delta, sds member, int in_flags, int *
         if (isnan(delta->values[i])) return C_ERR;
         newscore->values[i] = delta->values[i] == 0.0 ? 0.0 : delta->values[i];
     }
-    sds item = zvItemCreate(newscore, member, sdslen(member));
-    sds inserted = fbtreeInsert(zs->tree, item);
-    serverAssert(hashtableAdd(zs->ht, inserted));
+    zvsetInsertNew(zs, zvItemCreate(newscore, member, sdslen(member)));
     *out_flags |= ZVADD_OUT_ADDED;
     return C_OK;
 }
 
 int zvsetDel(zvset *zs, sds member) {
+    if (zvsetIsCompact(zs)) {
+        long idx = zvCompactFindMember(zs, member, sdslen(member));
+        if (idx < 0) return 0;
+        sdsfree(zs->items[idx]);
+        zvCompactRemoveAt(zs, (unsigned long)idx, 1);
+        return 1;
+    }
     void *item = NULL;
     zsetMarkLookupKey(member);
     int found = hashtablePop(zs->ht, member, &item);
@@ -762,22 +1185,31 @@ int zvsetDel(zvset *zs, sds member) {
     return 1;
 }
 
-unsigned long zvsetLength(const zvset *zs) {
-    return fbtreeLength((fbtreeIndex *)zs->tree);
-}
-
 /* Duplicate a zvset object (for COPY). Same encoding guarantee. */
 robj *zvsetDup(robj *o) {
     serverAssert(objectGetType(o) == OBJ_ZVSET);
     zvset *zs = objectGetVal(o);
     robj *zobj = createZvsetObject(zs->dimensions);
     zvset *new_zs = objectGetVal(zobj);
+    if (zvsetIsCompact(zs)) {
+        if (zs->count) {
+            zvCompactResize(new_zs, zs->count);
+            uint16_t *tags = zvCompactTags(zs), *new_tags = zvCompactTags(new_zs);
+            for (uint32_t i = 0; i < zs->count; i++) {
+                new_zs->items[i] = sdsdup(zs->items[i]);
+                new_tags[i] = tags[i];
+            }
+            new_zs->count = zs->count;
+        }
+        return zobj;
+    }
+    zvsetConvertToBtree(new_zs);
     hashtableExpand(new_zs->ht, hashtableSize(zs->ht));
-    /* Copy from greatest to smallest: optimal for fbtree inserts. */
+    /* Ascending inserts take fbtree's append path and leave full leaves. */
     fbtreeIterator iter;
     fbtreeInitIterator(&iter, zs->tree);
     const_sds item;
-    while ((item = fbtreePrev(&iter)) != NULL) {
+    while ((item = fbtreeNext(&iter)) != NULL) {
         sds copy = sdsdup(item);
         sds inserted = fbtreeInsert(new_zs->tree, copy);
         serverAssert(hashtableAdd(new_zs->ht, inserted));

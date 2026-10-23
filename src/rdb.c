@@ -1257,32 +1257,24 @@ ssize_t rdbSaveObject(rio *rdb, robj *o, robj *key, int dbid, unsigned char rdbt
     } else if (objectGetType(o) == OBJ_ZVSET) {
         /* Save a zvset value: dimensions + (member, vector) pairs. */
         zvset *zs = objectGetVal(o);
-        if ((n = rdbSaveLen(rdb, fbtreeLength(zs->tree))) == -1) return -1;
+        if ((n = rdbSaveLen(rdb, zvsetLength(zs))) == -1) return -1;
         nwritten += n;
         if ((n = rdbSaveLen(rdb, zs->dimensions)) == -1) return -1;
         nwritten += n;
-        hashtableIterator iter;
-        hashtableInitIterator(&iter, zs->ht, 0);
-        void *next;
-        while (hashtableNext(&iter, &next)) {
-            const_sds item = next;
+        zvsetIterator iter;
+        zvsetInitIterator(&iter, zs);
+        const_sds item;
+        while ((item = zvsetNext(&iter)) != NULL) {
             size_t member_len;
             const char *member = zvItemMember(item, &member_len);
             uint8_t dims = zvItemDimensions(item);
-            if ((n = rdbSaveRawString(rdb, (unsigned char *)member, member_len)) == -1) {
-                hashtableCleanupIterator(&iter);
-                return -1;
-            }
+            if ((n = rdbSaveRawString(rdb, (unsigned char *)member, member_len)) == -1) return -1;
             nwritten += n;
             for (int i = 0; i < dims; i++) {
-                if ((n = rdbSaveBinaryDoubleValue(rdb, zvItemScoreAt(item, (uint8_t)i))) == -1) {
-                    hashtableCleanupIterator(&iter);
-                    return -1;
-                }
+                if ((n = rdbSaveBinaryDoubleValue(rdb, zvItemScoreAt(item, (uint8_t)i))) == -1) return -1;
                 nwritten += n;
             }
         }
-        hashtableCleanupIterator(&iter);
     } else if (objectGetType(o) == OBJ_MODULE) {
         /* Save a module-specific value. */
         ValkeyModuleIO io;
@@ -2690,9 +2682,9 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error, int rd
             return NULL;
         }
         if (zvlen == 0) goto emptykey;
-        o = createZvsetObject((uint8_t)dimslen);
-        zvset *zs = objectGetVal(o);
-        if (!hashtableTryExpand(zs->ht, zvlen)) {
+        zvset *zs = zvsetCreateSized((uint8_t)dimslen, zvlen);
+        o = createZvsetObjectFrom(zs);
+        if (!zvsetTryExpand(zs, zvlen)) {
             rdbReportCorruptRDB("OOM in hashtableTryExpand %llu", (unsigned long long)zvlen);
             decrRefCount(o);
             return NULL;
@@ -2726,9 +2718,9 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error, int rd
             zfree(vals);
             sds item = zvItemCreate(score, member, sdslen(member));
             zvScoreFree(score);
-            sds inserted = fbtreeInsert(zs->tree, item);
-            if (!hashtableAdd(zs->ht, inserted)) {
+            if (!zvsetTryInsert(zs, item)) {
                 rdbReportCorruptRDB("Duplicate zvset fields detected");
+                sdsfree(item);
                 decrRefCount(o);
                 sdsfree(member);
                 return NULL;

@@ -3,11 +3,11 @@
 
 #include "sds.h"
 #include "hashtable.h"
+#include "fbtree.h"
 #include <stddef.h>
 #include <stdint.h>
 
 /* Forward declarations. */
-typedef struct fbtreeIndex fbtreeIndex;
 struct client;
 struct serverObject;
 
@@ -23,10 +23,27 @@ struct serverObject;
  * lexicographical comparison of packed items matches numeric vector
  * lexicographical ordering. dims is identical for all items of a key,
  * so the leading byte does not affect ordering within a key.
+ *
+ * Two encodings, both holding the same packed items:
+ *
+ * - compact: a sorted array of items (no hashtable, no tree). Member
+ *   lookups scan the array, rank lookups binary search it. Used while the
+ *   key has at most zset-max-listpack-entries members, each at most
+ *   zset-max-listpack-value bytes, like ZSET's listpack encoding.
+ * - btree: fbtree (owns the items, ordered) plus a hashtable of
+ *   non-owning pointers to them (member lookups).
+ *
+ * A key converts to btree when it outgrows the compact limits and never
+ * converts back in place; newly built results (STORE commands) start in
+ * whichever encoding fits their size.
  */
 typedef struct zvset {
-    hashtable *ht;
-    fbtreeIndex *tree;
+    hashtable *ht;     /* btree: member -> item (non-owning) */
+    fbtreeIndex *tree; /* btree: ordered items (owning); NULL = compact */
+    sds *items;        /* compact: ordered items (owning), then a member
+                        * hash tag per slot (see zvCompactTags()) */
+    uint32_t count;    /* compact: number of items */
+    uint32_t capacity; /* compact: allocated slots */
     uint8_t dimensions;
 } zvset;
 
@@ -168,6 +185,55 @@ int zvItemScoreCompare(const_sds item, const zvScore *score);
 sds zvItemFormatScore(const_sds item);
 /* Same, into buf of ZVSET_SCORE_BUFLEN bytes. Returns the length. */
 size_t zvItemFormatScoreBuf(const_sds item, char *buf);
+
+/* --- Encoding-independent container API --- */
+
+zvset *zvsetCreate(uint8_t dimensions);
+/* Create in the encoding that fits size_hint members. */
+zvset *zvsetCreateSized(uint8_t dimensions, unsigned long size_hint);
+void zvsetRelease(zvset *zs);
+static inline int zvsetIsCompact(const zvset *zs) {
+    return zs->tree == NULL;
+}
+const char *zvsetEncodingName(const zvset *zs);
+/* Convert a btree key that fits the compact limits back to compact. */
+void zvsetCompactIfFits(zvset *zs);
+/* Reserve room for size members; returns 0 on allocation failure. */
+int zvsetTryExpand(zvset *zs, unsigned long size);
+/* Insert an item (ownership transfers) whose member is absent. */
+void zvsetInsertNew(zvset *zs, sds item);
+/* Same, but returns 0 without taking ownership if the member exists. */
+int zvsetTryInsert(zvset *zs, sds item);
+/* Build a zvset from a hashtable of owned items (zvsetHashtableType).
+ * The hashtable is consumed. */
+zvset *zvsetFromHashtable(uint8_t dimensions, hashtable *ht);
+/* The stored item whose member equals item's member, or NULL. */
+const_sds zvsetFindItemMember(zvset *zs, const_sds item);
+long zvsetRankOf(zvset *zs, const_sds item);
+const_sds zvsetGetAtRank(zvset *zs, unsigned long rank);
+/* Remove and return the min/max item; the caller frees it. */
+sds zvsetPop(zvset *zs, int max);
+/* Delete (and free) the items at ranks [lo,hi). Returns the count. */
+unsigned long zvsetDeleteRangeByRank(zvset *zs, unsigned long lo, unsigned long hi);
+/* Batch deletes: avoid hashtable shrinking until resumed. */
+void zvsetPauseAutoShrink(zvset *zs);
+void zvsetResumeAutoShrink(zvset *zs);
+size_t zvsetAllocSize(zvset *zs, size_t sample_size);
+
+/* Ordered iterator. After init, Next() starts at rank 0 and Prev() at
+ * the last rank; after SeekToRank(r), Next() yields r and Prev() r-1.
+ * The set must not be modified while iterating. */
+typedef struct zvsetIterator {
+    zvset *zs;
+    unsigned long pos; /* compact: rank Next() returns */
+    int fresh;         /* compact: Prev() starts from the end */
+    fbtreeIterator it;
+} zvsetIterator;
+
+void zvsetInitIterator(zvsetIterator *it, zvset *zs);
+void zvsetSeekToRank(zvsetIterator *it, unsigned long rank);
+const_sds zvsetNext(zvsetIterator *it);
+const_sds zvsetPrev(zvsetIterator *it);
 
 /* Core operations. member is a plain SDS (not owned). */
 int zvsetAdd(zvset *zs, const zvScore *score, sds member, int in_flags, int *out_flags);

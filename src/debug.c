@@ -279,12 +279,10 @@ void xorObjectDigest(serverDb *db, robj *keyobj, unsigned char *digest, robj *o)
         pathHashTypeDigest(digest, o);
     } else if (objectGetType(o) == OBJ_ZVSET) {
         unsigned char eledigest[20];
-        zvset *zs = objectGetVal(o);
-        hashtableIterator iter;
-        hashtableInitIterator(&iter, zs->ht, 0);
-        void *next;
-        while (hashtableNext(&iter, &next)) {
-            const_sds item = next;
+        zvsetIterator iter;
+        zvsetInitIterator(&iter, objectGetVal(o));
+        const_sds item;
+        while ((item = zvsetNext(&iter)) != NULL) {
             size_t member_len;
             const char *member = zvItemMember(item, &member_len);
             sds formatted = zvItemFormatScore(item);
@@ -294,7 +292,6 @@ void xorObjectDigest(serverDb *db, robj *keyobj, unsigned char *digest, robj *o)
             sdsfree(formatted);
             xorDigest(digest, eledigest, 20);
         }
-        hashtableCleanupIterator(&iter);
     } else if (objectGetType(o) == OBJ_MODULE) {
         ValkeyModuleDigest md = {{0}, {0}, keyobj, db->id};
         moduleValue *mv = objectGetVal(o);
@@ -726,7 +723,7 @@ void debugCommand(client *c) {
             addReplyErrorObject(c, shared.nokeyerr);
             return;
         }
-        strenc = strEncoding(val->encoding);
+        strenc = (char *)objectEncodingName(val);
 
         char extra[138] = {0};
         if (val->encoding == OBJ_ENCODING_QUICKLIST) {

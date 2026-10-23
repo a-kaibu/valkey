@@ -1316,7 +1316,7 @@ void scanGenericCommandWithOptions(client *c, robj *o, unsigned long long cursor
         ht = zs->ht;
         /* scanning ZSET allocates temporary strings even though it's a dict */
         free_callback = sdsfree;
-    } else if (o->type == OBJ_ZVSET && o->encoding == OBJ_ENCODING_BTREE) {
+    } else if (o->type == OBJ_ZVSET && !zvsetIsCompact(objectGetVal(o))) {
         zvset *zs = objectGetVal(o);
         ht = zs->ht;
         /* scanning ZVSET allocates temporary strings even though it's a dict */
@@ -1420,6 +1420,23 @@ void scanGenericCommandWithOptions(client *c, robj *o, unsigned long long cursor
             if (!opts->only_keys) {
                 str = lpGet(vptr, &len, intbuf);
                 item = sdsnewlen(str, len);
+                addScanDataItem(&result, (const char *)item, sdslen(item));
+            }
+        }
+        cursor = 0;
+    } else if (o->type == OBJ_ZVSET) {
+        /* Compact zvsets are small enough to return in one call. */
+        zvsetIterator it;
+        zvsetInitIterator(&it, objectGetVal(o));
+        const_sds entry;
+        while ((entry = zvsetNext(&it)) != NULL) {
+            size_t len;
+            const char *member = zvItemMember(entry, &len);
+            if (opts->use_pattern && !stringmatchlen(opts->pat, opts->patlen, member, len, 0)) continue;
+            sds item = sdsnewlen(member, len);
+            addScanDataItem(&result, (const char *)item, sdslen(item));
+            if (!opts->only_keys) {
+                item = zvItemFormatScore(entry);
                 addScanDataItem(&result, (const char *)item, sdslen(item));
             }
         }
