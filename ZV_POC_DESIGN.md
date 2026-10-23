@@ -6,10 +6,11 @@ TairZset相当以上の機能をValkey 9.2のZSETに近い統一APIで提供す�
 
 <!-- SPDX-License-Identifier: BSD-3-Clause -->
 
-## コマンド一覧 (33コマンド名)
+## コマンド一覧 (35コマンド名)
 
 基本: `ZVADD` (NX/XX/GT/LT/CH/INCR), `ZVREM`, `ZVSCORE`, `ZVMSCORE`,
-`ZVRANK`/`ZVREVRANK` (WITHSCORE), `ZVCARD`, `ZVINCRBY`。
+`ZVRANK`/`ZVREVRANK` (WITHSCORE), `ZVRANKBYSCORE`/`ZVREVRANKBYSCORE`
+(TairZset `EXZRANKBYSCORE` 相当), `ZVCARD`, `ZVINCRBY`。
 
 範囲: `ZVRANGE` (rank/BYSCORE/BYLEX + REV/LIMIT/WITHSCORES),
 `ZVREVRANGE`, `ZVRANGEBYSCORE`, `ZVREVRANGEBYSCORE`,
@@ -71,6 +72,8 @@ comparator等のfbtree側変更はなし (`fbtree.c`, `ordered_index.*` 無変�
 - `NaN` 拒否 (`string2d()` が拒否)。
 - `-0.0` は `+0.0` にcanonicalize (parse時・pack時・sortable変換時の3箇所)。
 - `+inf` / `-inf` はZSET同様に扱う。
+- 範囲境界のスカラー `-inf` / `+inf` は多次元キーでも全次元がその値の
+  vectorに展開する (TairZsetの `EXZRANGEBYSCORE key -inf +inf` 互換)。
 
 ## score parser
 
@@ -135,9 +138,11 @@ key単位で固定。最初の `ZVADD` で確定し、以降の不一致は
 | RDB save   | hashtable walk → member + binary doubles                |
 | AOF rewrite| `ZVADD` 再発行 (`rewriteZvsetObject()`)                 |
 | defrag     | `fbtreeDefragScan()` + hashtable pointer更新callback    |
-| blocking   | `BLOCKED_ZSET` 共用 (`getBlockedTypeByType` に1行追加)。|
-|            | wakeは作成時 `dbAdd` 経路のみ。cross-type wakeは型再検証で|
-|            | WRONGTYPE (クラッシュなし)。                            |
+| blocking   | 専用の `BLOCKED_ZVSET`。ZSETと共用するとZVADDでBZPOPMIN |
+|            | 待ちが起床してWRONGTYPEになるため分離 (ZSET作成でも      |
+|            | BZVPOP*は起床しない)。                                  |
+| 範囲解決   | rank/score/lex を `zvResolveRange()` で rank窓 [lo,hi)  |
+|            | に変換し、RANGE*/RANGESTORE/COUNT/REMRANGEBY* が共用。  |
 
 計算量目標: `ZVADD O(d·logN)` (worst; tree探索中の各キー比較がvector長に
 依存するため。fbtreeはprefix特徴量を活用するので常に最悪になるわけではない),
@@ -156,7 +161,7 @@ key単位で固定。最初の `ZVADD` で確定し、以降の不一致は
   prototypes), `src/object.c`, `src/db.c` (type名/COPY/SCAN汎用経路),
   `src/rdb.h`/`src/rdb.c` (`RDB_TYPE_ZVSET=24`), `src/aof.c`,
   `src/lazyfree.c`, `src/defrag.c`, `src/debug.c`,
-  `src/valkey-check-rdb.c`, `src/blocked.c` (ZVSET→BLOCKED_ZSET共用の1行),
+  `src/valkey-check-rdb.c`, `src/blocked.c`/`src/cluster.c` (`BLOCKED_ZVSET` の追加),
   `src/Makefile`, `cmake/Modules/SourceFiles.cmake`,
   `src/commands.def` (生成),
   push時非テストGHA6件に `branches-ignore: poc/zv-multiscore`。
@@ -239,6 +244,10 @@ dim-first/lastで大差なし (d16: 1.8ms vs 4.1ms、要再測定)。
     push・workflow_dispatchのどちらでもフル計測し、
     TSV/JSONL/txtをartifact化しsummaryに投稿。
     dispatch `bench=all` で range/pop/setops/query も実行 (N cap 100K)。
+  - `zv-ab`: base (pushでは直前のhead、dispatchでは `ab_base`) と
+    HEAD を同一ランナーでビルドし、`utils/zv_cpu_benchmark.tcl`
+    (N=30000, d16) を交互に3ラウンド実行。`INFO commandstats` の
+    サーバー実行時間の中央値を比較表としてsummaryに投稿。
 
 ## 残課題 (upstream提案時)
 
@@ -247,7 +256,9 @@ dim-first/lastで大差なし (d16: 1.8ms vs 4.1ms、要再測定)。
 - listpack/compact encoding (全サイズfbtreeのまま)。
 - per-dimension ASC/DESC、多次元filterのsecondary index
   (`ZVQUERY` は先頭次元の範囲を既存treeで絞り込む)。
-- `RDB_TYPE_ZVSET=24` の正式type ID・RDB version対応の決定。
+- `RDB_TYPE_ZVSET=24` の正式type ID・RDB version対応の決定
+  (現状RDB_VERSION 81のまま追加しており、素の9.2はこのRDBを読めない)。
+- 最大次元数: TairZsetは256、本実装は先頭1Bに格納するため255。
 - module API、cluster固有integrationの深掘り。
 - `unstable` への追随。
 - 本格性能評価は専用server/client・固定flags・5回中央値・
@@ -255,7 +266,7 @@ dim-first/lastで大差なし (d16: 1.8ms vs 4.1ms、要再測定)。
 
 ## 最終報告 (§18対応)
 
-1. 実装コマンド: 上記33コマンド名 (ラッパー含む)。
+1. 実装コマンド: 上記35コマンド名 (ラッパー含む)。
 2. アーキテクチャ変更: ZVSET型追加＋既存経路への最小配線のみ。
    `fbtree.c`/`OrderedIndex`/ZSET無変更。
 3. テスト: `unit/type/zvset` 55 passed (randomized fuzz含む)、
