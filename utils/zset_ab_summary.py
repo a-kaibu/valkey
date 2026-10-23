@@ -6,7 +6,8 @@ Usage: zset_ab_summary.py <dir> <base-sha> <head-sha>
 <dir> holds:
   time-base-<round>.tsv, time-head-<round>.tsv  server time per case
   zv-head-<round>.tsv                           head runs with zv-* cases
-  ir-base/, ir-head/                            callgrind dumps, one per case
+  ir-base/, ir-head/                            callgrind dumps (see load_ir)
+  ir-base.tsv, ir-head.tsv                      the benchmark output of those runs
 Prints a markdown report on stdout.
 """
 import glob
@@ -27,20 +28,20 @@ def load_times(pattern):
     return {k: statistics.median(v) for k, v in runs.items()}
 
 
-def load_ir(directory):
-    """Instructions per case from callgrind dumps triggered after each case."""
-    ir = {}
+def load_ir(directory, tsv):
+    """Instructions per case. The server ran under callgrind with
+    --dump-before=echoCommand and the benchmark (--callgrind 1, one repeat)
+    sent an ECHO before and after each case's payload, so dumps 2, 4, 6, ...
+    hold the payloads of the cases in the order of the benchmark output."""
+    labels = [line.split("\t")[0] for line in open(tsv) if not line.startswith(("#", "case"))]
+    totals = {}
     for path in glob.glob(os.path.join(directory, "cg.out.*")):
-        label = total = None
+        seq = path.rsplit(".", 1)[1]
         for line in open(path, errors="replace"):
-            if line.startswith("desc: Trigger:"):
-                label = line.rsplit(" ", 1)[1].strip()
-            elif line.startswith("totals:"):
-                total = int(line.split()[1])
+            if line.startswith("totals:"):
+                totals[int(seq)] = int(line.split()[1])
                 break
-        if label and total is not None:
-            ir[label] = total
-    return ir
+    return {label: totals[2 * (i + 1)] for i, label in enumerate(labels) if 2 * (i + 1) in totals}
 
 
 def geomean(values):
@@ -52,16 +53,16 @@ def main():
     d, base_sha, head_sha = sys.argv[1:4]
     base_t = load_times(os.path.join(d, "time-base-*.tsv"))
     head_t = load_times(os.path.join(d, "time-head-*.tsv"))
-    base_ir = load_ir(os.path.join(d, "ir-base"))
-    head_ir = load_ir(os.path.join(d, "ir-head"))
+    base_ir = load_ir(os.path.join(d, "ir-base"), os.path.join(d, "ir-base.tsv"))
+    head_ir = load_ir(os.path.join(d, "ir-head"), os.path.join(d, "ir-head.tsv"))
     cases = [c for c in base_t if c in head_t]
 
     print("## ZSET A/B: existing ZSET commands, base vs this branch")
     print(f"base `{base_sha}`  head `{head_sha}`")
     print()
     print("Server time: median of alternating rounds (us/command, from INFO commandstats).")
-    print("Instructions: callgrind instruction count per case (deterministic; setup included,")
-    print("identical on both sides). `small` = listpack (64 members), `large` = btree.")
+    print("Instructions: callgrind instruction count of each case's commands (N=3000).")
+    print("`small` = listpack (64 members), `large` = btree.")
     print()
     print("| case | base us | head us | time ratio | base Mi | head Mi | instr. diff |")
     print("|---|---:|---:|---:|---:|---:|---:|")

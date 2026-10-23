@@ -3,14 +3,14 @@
 # encodings) next to their one-dimensional ZV equivalents. Used by the
 # zset-ab CI job to check that the ZV changes do not slow ZSET down, and to
 # compare ZV with ZSET on the same server.
-# Usage: tclsh utils/zset_compare_benchmark.tcl --port 6379 [--n 30000] [--small 64] [--repeats 5] [--kinds "z zv"]
+# Usage: tclsh utils/zset_compare_benchmark.tcl --port 6379 [--n 30000] [--small 64] [--repeats 5] [--kinds "z zv"] [--callgrind 0|1]
 # Run against a dedicated, persistence-disabled server with no other clients.
 # Output: TSV "case<TAB>server_us<TAB>min<TAB>max<TAB>wall_us<TAB>repeats<TAB>iterations".
 # A server without the ZV commands (e.g. the base branch) skips zv-* cases.
 # SPDX-License-Identifier: BSD-3-Clause
 
 source [file join [file dirname [info script]] zv_bench_lib.tcl]
-array set opt {port 6379 n 30000 small 64 repeats 5 kinds {z zv}}
+array set opt {port 6379 n 30000 small 64 repeats 5 kinds {z zv} callgrind 0}
 for {set i 0} {$i < $argc} {incr i} {
     set arg [lindex $argv $i]
     set name [string range $arg 2 end]
@@ -45,21 +45,19 @@ proc measure_payload {fd label command cmds repeats {prepare {}}} {
     for {set rep 0} {$rep < $repeats} {incr rep} {
         foreach p $prepare {check [zvbench::req $fd {*}$p]}
         set before [command_usec $fd $command]
+        # With --callgrind 1 the server runs under valgrind --tool=callgrind
+        # --dump-before=echoCommand: an ECHO on each side of the payload
+        # makes every second profile dump hold exactly one payload.
+        if {$::opt(callgrind)} {check [zvbench::req $fd ECHO start]}
         set start [clock microseconds]
         puts -nonewline $fd $payload
         flush $fd
         for {set i 0} {$i < $iterations} {incr i} {check [zvbench::readReply $fd]}
+        if {$::opt(callgrind)} {check [zvbench::req $fd ECHO $label]}
         lappend wall [expr {([clock microseconds] - $start) / double($iterations)}]
         lappend cpu [expr {([command_usec $fd $command] - $before) / double($iterations)}]
     }
     set sorted [lsort -real $cpu]
-    # Under valgrind --tool=callgrind, ZCMP_CALLGRIND_PID=<pid> dumps
-    # the profile after every case, for instruction counts per case.
-    # --max-invoke-ms=0: wait for the server to wake up (serverCron) rather
-    # than ptrace it, which CI runners do not allow.
-    if {[info exists ::env(ZCMP_CALLGRIND_PID)]} {
-        exec vgdb --pid=$::env(ZCMP_CALLGRIND_PID) --max-invoke-ms=0 dump $label >/dev/null 2>/dev/null
-    }
     puts [join [list $label [zvbench::percentile $sorted 0.5] [lindex $sorted 0] [lindex $sorted end] \
         [zvbench::percentile [lsort -real $wall] 0.5] $repeats $iterations] \t]
     flush stdout
