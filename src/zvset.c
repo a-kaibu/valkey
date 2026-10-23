@@ -521,16 +521,15 @@ double zvItemScoreAt(const_sds item, uint8_t dimension) {
     return zvSortableToScore(sortable);
 }
 
-/* Compare only as far as the first differing component. Packed scores
- * are canonical and byte ordered, so GT/LT need no decoded allocation. */
+/* Packed scores are canonical and byte ordered, so equality and GT/LT
+ * need no decoded allocation. */
 int zvItemScoreCompare(const_sds item, const zvScore *score) {
     serverAssert((uint8_t)item[0] == score->len);
-    for (int i = 0; i < score->len; i++) {
-        uint64_t sortable = zvScoreToSortable(score->values[i]);
-        int cmp = memcmp(item + 1 + (size_t)i * 8, &sortable, sizeof(sortable));
-        if (cmp) return cmp;
-    }
-    return 0;
+    /* Encoding every component and doing one memcmp is cheaper than a
+     * memcmp per component, even when an early component differs. */
+    uint64_t encoded[ZVSET_MAX_DIMENSIONS];
+    for (int i = 0; i < score->len; i++) encoded[i] = zvScoreToSortable(score->values[i]);
+    return memcmp(item + 1, encoded, (size_t)score->len * sizeof(uint64_t));
 }
 
 /* The encoded form is canonical (-0 normalized at parse and pack time),
