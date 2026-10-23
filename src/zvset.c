@@ -485,8 +485,11 @@ const_sds zvsetFindItemMember(zvset *zs, const_sds item) {
 
 long zvsetRankOf(zvset *zs, const_sds item) {
     if (zvsetIsCompact(zs)) {
-        unsigned long idx = zvCompactLowerBound(zs, item, sdslen(item));
-        return (idx < zs->count && zs->items[idx] == item) ? (long)idx : -1;
+        /* Comparing pointers in one contiguous array beats a binary search
+         * that dereferences and compares whole items. */
+        for (uint32_t i = 0; i < zs->count; i++)
+            if (zs->items[i] == item) return (long)i;
+        return -1;
     }
     return fbtreeGetIndexOfItem(zs->tree, item);
 }
@@ -568,7 +571,20 @@ void zvsetInitIterator(zvsetIterator *it, zvset *zs) {
     it->zs = zs;
     it->pos = 0;
     it->fresh = 1;
+    it->unordered = 0;
     if (!zvsetIsCompact(zs)) fbtreeInitIterator(&it->it, zs->tree);
+}
+
+void zvsetInitUnorderedIterator(zvsetIterator *it, zvset *zs) {
+    zvsetInitIterator(it, zs);
+    if (zvsetIsCompact(zs)) return;
+    it->unordered = 1;
+    hashtableInitIterator(&it->hit, zs->ht, 0);
+}
+
+void zvsetResetIterator(zvsetIterator *it) {
+    if (it->unordered) hashtableCleanupIterator(&it->hit);
+    it->unordered = 0;
 }
 
 void zvsetSeekToRank(zvsetIterator *it, unsigned long rank) {
@@ -581,12 +597,17 @@ void zvsetSeekToRank(zvsetIterator *it, unsigned long rank) {
 }
 
 const_sds zvsetNext(zvsetIterator *it) {
+    if (it->unordered) {
+        void *next;
+        return hashtableNext(&it->hit, &next) ? next : NULL;
+    }
     if (!zvsetIsCompact(it->zs)) return fbtreeNext(&it->it);
     it->fresh = 0;
     return it->pos < it->zs->count ? it->zs->items[it->pos++] : NULL;
 }
 
 const_sds zvsetPrev(zvsetIterator *it) {
+    serverAssert(!it->unordered);
     if (!zvsetIsCompact(it->zs)) return fbtreePrev(&it->it);
     if (it->fresh) {
         it->pos = it->zs->count;

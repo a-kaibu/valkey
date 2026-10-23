@@ -1553,7 +1553,7 @@ static void zvsetopGenericCommand(client *c, robj *dstkey, int numkeysIndex, int
         unsigned long cardinality = 0;
         if (driver >= 0 && zvSetOpSrcLen(&src[driver]) > 0) {
             zvsetIterator iter;
-            zvsetInitIterator(&iter, objectGetVal(src[driver].subject));
+            zvsetInitUnorderedIterator(&iter, objectGetVal(src[driver].subject));
             const_sds next;
             while ((next = zvsetNext(&iter)) != NULL) {
                 int present = 1;
@@ -1572,6 +1572,7 @@ static void zvsetopGenericCommand(client *c, robj *dstkey, int numkeysIndex, int
                 cardinality++;
                 if (limit && cardinality >= (unsigned long)limit) break;
             }
+            zvsetResetIterator(&iter);
         }
         zfree(src);
         addReplyLongLong(c, (long long)cardinality);
@@ -1595,7 +1596,7 @@ static void zvsetopGenericCommand(client *c, robj *dstkey, int numkeysIndex, int
         for (long i = 0; i < setnum; i++) {
             if (src[i].subject == NULL) continue;
             zvsetIterator iter;
-            zvsetInitIterator(&iter, objectGetVal(src[i].subject));
+            zvsetInitUnorderedIterator(&iter, objectGetVal(src[i].subject));
             const_sds next;
             while ((next = zvsetNext(&iter)) != NULL) {
                 size_t mlen;
@@ -1620,6 +1621,7 @@ static void zvsetopGenericCommand(client *c, robj *dstkey, int numkeysIndex, int
                     }
                 }
             }
+            zvsetResetIterator(&iter);
         }
         tmp = zvsetFromHashtable(dims, acc);
     } else if (op == ZV_OP_INTER && dims) {
@@ -1636,7 +1638,7 @@ static void zvsetopGenericCommand(client *c, robj *dstkey, int numkeysIndex, int
             tmp = zvsetCreateSized(dims, zvSetOpSrcLen(&src[driver]));
             zvsetTryExpand(tmp, zvSetOpSrcLen(&src[driver]));
             zvsetIterator iter;
-            zvsetInitIterator(&iter, objectGetVal(src[driver].subject));
+            zvsetInitUnorderedIterator(&iter, objectGetVal(src[driver].subject));
             const_sds next;
             while ((next = zvsetNext(&iter)) != NULL) {
                 size_t mlen;
@@ -1654,6 +1656,7 @@ static void zvsetopGenericCommand(client *c, robj *dstkey, int numkeysIndex, int
                 }
                 if (k == setnum) zvSetOpResultInsert(tmp, scratch_c, member, mlen);
             }
+            zvsetResetIterator(&iter);
             zvsetCompactIfFits(tmp);
         }
     } else if (op == ZV_OP_DIFF && dims) {
@@ -1662,7 +1665,7 @@ static void zvsetopGenericCommand(client *c, robj *dstkey, int numkeysIndex, int
             tmp = zvsetCreateSized(dims, zvSetOpSrcLen(&src[0]));
             zvsetTryExpand(tmp, zvSetOpSrcLen(&src[0]));
             zvsetIterator iter;
-            zvsetInitIterator(&iter, objectGetVal(src[0].subject));
+            zvsetInitUnorderedIterator(&iter, objectGetVal(src[0].subject));
             const_sds next;
             while ((next = zvsetNext(&iter)) != NULL) {
                 int k;
@@ -1672,6 +1675,7 @@ static void zvsetopGenericCommand(client *c, robj *dstkey, int numkeysIndex, int
                 }
                 if (k == setnum) zvsetInsertNew(tmp, sdsdup(next));
             }
+            zvsetResetIterator(&iter);
             zvsetCompactIfFits(tmp);
         }
     }

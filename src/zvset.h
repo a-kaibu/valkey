@@ -222,15 +222,23 @@ size_t zvsetAllocSize(zvset *zs, size_t sample_size);
 
 /* Ordered iterator. After init, Next() starts at rank 0 and Prev() at
  * the last rank; after SeekToRank(r), Next() yields r and Prev() r-1.
- * The set must not be modified while iterating. */
+ * The set must not be modified while iterating.
+ *
+ * The unordered variant only supports Next() and must be finished with
+ * zvsetResetIterator(). A btree set then walks its hashtable, which keeps
+ * lookups into other sets in hash order (setops) cache friendly. */
 typedef struct zvsetIterator {
     zvset *zs;
     unsigned long pos; /* compact: rank Next() returns */
     int fresh;         /* compact: Prev() starts from the end */
+    int unordered;     /* btree: walking the hashtable */
     fbtreeIterator it;
+    hashtableIterator hit;
 } zvsetIterator;
 
 void zvsetInitIterator(zvsetIterator *it, zvset *zs);
+void zvsetInitUnorderedIterator(zvsetIterator *it, zvset *zs);
+void zvsetResetIterator(zvsetIterator *it);
 void zvsetSeekToRank(zvsetIterator *it, unsigned long rank);
 const_sds zvsetNext(zvsetIterator *it);
 const_sds zvsetPrev(zvsetIterator *it);
