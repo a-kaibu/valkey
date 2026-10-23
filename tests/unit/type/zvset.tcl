@@ -1063,14 +1063,15 @@ start_server {tags {"zvset-compat"}} {
     }
 
     test "ZVSET keyspace notifications use the sorted set class and emit del" {
+        set db [expr {$::singledb ? 0 : 9}]
         r config set notify-keyspace-events Kz
         set rd [valkey_deferring_client]
         $rd psubscribe __keyspace@*__:nk
         $rd read
         r zvadd nk 1#1 a 2#2 b
         r zvrem nk a b
-        assert_equal {pmessage __keyspace@*__:nk __keyspace@9__:nk zvadd} [$rd read]
-        assert_equal {pmessage __keyspace@*__:nk __keyspace@9__:nk zvrem} [$rd read]
+        assert_equal "pmessage __keyspace@*__:nk __keyspace@${db}__:nk zvadd" [$rd read]
+        assert_equal "pmessage __keyspace@*__:nk __keyspace@${db}__:nk zvrem" [$rd read]
         $rd close
         r config set notify-keyspace-events Kg
         set rd [valkey_deferring_client]
@@ -1078,7 +1079,7 @@ start_server {tags {"zvset-compat"}} {
         $rd read
         r zvadd nk 1#1 a
         r zvrem nk a
-        assert_equal {pmessage __keyspace@*__:nk __keyspace@9__:nk del} [$rd read]
+        assert_equal "pmessage __keyspace@*__:nk __keyspace@${db}__:nk del" [$rd read]
         $rd close
         r config set notify-keyspace-events ""
     }
