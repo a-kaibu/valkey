@@ -136,7 +136,17 @@ foreach {label args} {
 }
 measure $fd query-last [list ZVQUERY $prefix:0 FILTER [expr {$opt(dims)-1}] 49.5 50.5] 100 $opt(repeats)
 measure $fd range-scores [list ZVRANGE $prefix:0 0 99 WITHSCORES] 100 $opt(repeats)
+set lo [join [lrepeat $opt(dims) 40] #]
+set hi [join [lrepeat $opt(dims) 60] #]
+measure $fd rangebyscore-scores [list ZVRANGEBYSCORE $prefix:0 $lo $hi WITHSCORES LIMIT 0 100] 100 $opt(repeats)
+measure $fd count [list ZVCOUNT $prefix:0 $lo $hi] 1000 $opt(repeats)
+measure $fd rank [list ZVRANK $prefix:0 [zvbench::member 0]] 1000 $opt(repeats)
 measure $fd score [list ZVSCORE $prefix:0 [zvbench::member 0]] 1000 $opt(repeats)
+set members {}
+for {set m 0} {$m < 10} {incr m} {lappend members [zvbench::member $m]}
+measure $fd mscore-10 [list ZVMSCORE $prefix:0 {*}$members] 1000 $opt(repeats)
+set delta [join [lrepeat $opt(dims) 0] #]
+measure $fd incrby-zero [list ZVINCRBY $prefix:0 $delta [zvbench::member 0]] 1000 $opt(repeats)
 set vec [zvbench::genvec 0 $opt(dims) 0 rand_uniform]
 measure $fd update-noop [list ZVADD $prefix:0 $vec [zvbench::member 0]] 1000 $opt(repeats)
 measure $fd update-gt-noop [list ZVADD $prefix:0 GT $vec [zvbench::member 0]] 1000 $opt(repeats)

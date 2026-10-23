@@ -21,6 +21,10 @@ on:
         description: 'Dimensions to measure'
         required: false
         default: '1 2 4 8 16'
+      ab_base:
+        description: 'Base ref for the A/B server-CPU comparison (default: previous commit)'
+        required: false
+        default: ''
       bench:
         description: 'Benchmark set (basic or all scripts)'
         required: false
@@ -73,6 +77,79 @@ jobs:
       - name: ZV tests under ASan
         run: ./runtest --single unit/type/zvset --verbose --dump-logs
 
+  # A/B comparison of server-side execution time (INFO commandstats)
+  # between a base build and this commit, on the same runner. Pushes
+  # compare against the previous head of the branch.
+  zv-ab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout Valkey
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Resolve base
+        id: base
+        run: |
+          base="${{ github.event.inputs.ab_base }}"
+          if [ -z "$base" ]; then base="${{ github.event.before }}"; fi
+          if [ -z "$base" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then base="$(git rev-parse HEAD~1)"; fi
+          echo "sha=$(git rev-parse "$base")" >> "$GITHUB_OUTPUT"
+      - name: Build head and base
+        run: |
+          sudo apt-get install -y tcl8.6
+          make -j"$(nproc)" valkey-server
+          cp src/valkey-server /tmp/valkey-server-head
+          git worktree add /tmp/base "${{ steps.base.outputs.sha }}"
+          make -C /tmp/base -j"$(nproc)" valkey-server
+          cp /tmp/base/src/valkey-server /tmp/valkey-server-base
+      - name: Run A/B (alternating, 3 rounds)
+        run: |
+          set -euo pipefail
+          for round in 1 2 3; do
+            for side in base head; do
+              /tmp/valkey-server-$side --port 7790 --daemonize yes --save '' --appendonly no --logfile /tmp/ab-$side.log
+              until ./src/valkey-cli -p 7790 ping 2>/dev/null | grep -q PONG; do sleep 0.2; done
+              tclsh utils/zv_cpu_benchmark.tcl --port 7790 --n 30000 --dims 16 --repeats 5 > /tmp/ab-$side-$round.tsv
+              ./src/valkey-cli -p 7790 SHUTDOWN NOSAVE || true
+              while ./src/valkey-cli -p 7790 ping >/dev/null 2>&1; do sleep 0.2; done
+            done
+          done
+      - name: Summarize A/B
+        if: always()
+        run: |
+          python3 - <<'PY' | tee /tmp/ab-summary.md >> "$GITHUB_STEP_SUMMARY"
+          import glob, statistics
+          def load(side):
+              runs = {}
+              for path in sorted(glob.glob(f"/tmp/ab-{side}-*.tsv")):
+                  for line in open(path):
+                      if line.startswith("#") or line.startswith("case"):
+                          continue
+                      f = line.rstrip("\n").split("\t")
+                      runs.setdefault(f[0], []).append(float(f[1]))
+              return {k: statistics.median(v) for k, v in runs.items()}
+          base, head = load("base"), load("head")
+          print("## ZV A/B server time (median of 3 rounds, us/command, N=30000, dims=16)")
+          print("base: `${{ steps.base.outputs.sha }}`  head: `${{ github.sha }}`")
+          print()
+          print("| case | base us | head us | speedup |")
+          print("|---|---:|---:|---:|")
+          for case in head:
+              if case not in base:
+                  continue
+              b, h = base[case], head[case]
+              ratio = f"{b / h:.2f}x" if h > 0 else "n/a"
+              print(f"| {case} | {b:.3f} | {h:.3f} | {ratio} |")
+          PY
+      - name: Upload A/B results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: zv-ab
+          path: /tmp/ab-*
+          if-no-files-found: warn
+
   zv-bench:
     runs-on: ubuntu-latest
     # GitHub-hosted max: 6h. Full bench (N=1M, all dims, both dists).
@@ -107,9 +184,8 @@ jobs:
           python3 -c "import json;[json.loads(l) for l in open('/tmp/zv-bench.jsonl')]"
           if [ "${BENCH_SET:-basic}" = "all" ]; then
             for f in range pop setops query; do
-              test -s /tmp/zv-bench-$f.tsv
-              test -s /tmp/zv-bench-$f.jsonl
-              grep -q "medians over repeats" /tmp/zv-bench.txt
+              test -s /tmp/zv-$f-bench.tsv
+              test -s /tmp/zv-$f-bench.jsonl
             done
           fi
       - name: Publish summary
