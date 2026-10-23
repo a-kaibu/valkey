@@ -1,8 +1,10 @@
 name: ZV PoC tests + benchmarks
 
 # Dedicated workflow for the ZV (vector sorted set) PoC branch.
-# - zv-test runs on every push: build + ZV tests + ZSET regression.
-# - zv-asan runs the ZV tests under AddressSanitizer.
+# - zv-test runs on every push: build + ZV tests (including persistence and
+#   replication) + ZSET regression.
+# - zv-sanitizer runs the ZV tests and the corrupt-payload fuzzer under
+#   ASan and UBSan; zv-valgrind runs the ZV tests under Valgrind.
 # - zv-bench runs the full basic benchmark (N=1000000, dims 1/2/4/8/16,
 #   spread+shared) on push and on workflow_dispatch. With bench=all it
 #   additionally runs the range/pop/setops/query benchmark scripts.
@@ -60,22 +62,46 @@ jobs:
           sudo apt-get install -y tcl8.6 tclx
           make -j"$(nproc)"
       - name: ZV tests
-        run: ./runtest --single unit/type/zvset --verbose --dump-logs
+        run: ./runtest --single unit/type/zvset --single integration/zvset-durability --verbose --dump-logs
       - name: ZSET regression tests
         run: ./runtest --single unit/type/zset --verbose --dump-logs
 
-  zv-asan:
+  # ZV tests, persistence/replication tests and the corrupt-payload fuzzer
+  # (which covers zvset keys) under each sanitizer.
+  zv-sanitizer:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [address, undefined]
     steps:
       - name: Checkout Valkey
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Build with AddressSanitizer
+      - name: Build with ${{ matrix.sanitizer }} sanitizer
         run: |
           sudo apt-get install -y tcl8.6 tclx
-          make -j"$(nproc)" SANITIZER=address
-      - name: ZV tests under ASan
-        run: ./runtest --single unit/type/zvset --verbose --dump-logs
+          make -j"$(nproc)" SANITIZER=${{ matrix.sanitizer }} SERVER_CFLAGS='-Werror'
+      - name: ZV tests
+        run: |
+          ./runtest --single unit/type/zvset --single integration/zvset-durability \
+            --single integration/corrupt-dump-fuzzer --accurate --verbose --dump-logs
+
+  # Leak and invalid-access check of the same tests under Valgrind.
+  zv-valgrind:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout Valkey
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build for Valgrind
+        run: |
+          sudo apt-get install -y tcl8.6 tclx valgrind
+          make -j"$(nproc)" valgrind SERVER_CFLAGS='-Werror'
+      - name: ZV tests under Valgrind
+        run: |
+          ./runtest --valgrind --no-latency --single unit/type/zvset --single integration/zvset-durability \
+            --clients 1 --timeout 2400 --verbose --dump-logs
 
   # A/B comparison of server-side execution time (INFO commandstats)
   # between a base build and this commit, on the same runner. Pushes

@@ -2689,44 +2689,35 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error, int rd
             decrRefCount(o);
             return NULL;
         }
+        /* One score buffer for every member. */
+        zvScore *score = zvScoreCreate((uint8_t)dimslen);
         while (zvlen--) {
             sds member = rdbGenericLoadStringObject(rdb, RDB_LOAD_SDS, NULL);
-            if (member == NULL) {
-                decrRefCount(o);
-                return NULL;
-            }
-            double *vals = zmalloc(sizeof(double) * (size_t)dimslen);
-            int io_failed = 0, bad_score = 0;
-            for (uint64_t i = 0; i < dimslen; i++) {
-                if (rdbLoadBinaryDoubleValue(rdb, &vals[i]) == -1) {
-                    io_failed = 1;
-                    break;
+            int ok = member != NULL;
+            for (uint64_t i = 0; ok && i < dimslen; i++) {
+                if (rdbLoadBinaryDoubleValue(rdb, &score->values[i]) == -1) {
+                    ok = 0;
+                } else if (isnan(score->values[i])) {
+                    rdbReportCorruptRDB("Zvset with NAN score detected");
+                    ok = 0;
+                } else if (score->values[i] == 0.0) {
+                    score->values[i] = 0.0; /* -0 is stored as +0. */
                 }
-                if (isnan(vals[i])) bad_score = 1;
-                if (vals[i] == 0.0) vals[i] = 0.0;
             }
-            if (io_failed || bad_score) {
-                zfree(vals);
-                sdsfree(member);
-                decrRefCount(o);
-                if (bad_score) rdbReportCorruptRDB("Zvset with NAN score detected");
-                return NULL;
-            }
-            zvScore *score = zmalloc(sizeof(*score) + sizeof(double) * (size_t)dimslen);
-            score->len = (uint8_t)dimslen;
-            memcpy(score->values, vals, sizeof(double) * (size_t)dimslen);
-            zfree(vals);
-            sds item = zvItemCreate(score, member, sdslen(member));
-            zvScoreFree(score);
-            if (!zvsetTryInsert(zs, item)) {
+            sds item = ok ? zvItemCreate(score, member, sdslen(member)) : NULL;
+            sdsfree(member);
+            if (ok && !zvsetTryInsert(zs, item)) {
                 rdbReportCorruptRDB("Duplicate zvset fields detected");
                 sdsfree(item);
+                ok = 0;
+            }
+            if (!ok) {
+                zvScoreFree(score);
                 decrRefCount(o);
-                sdsfree(member);
                 return NULL;
             }
-            sdsfree(member);
         }
+        zvScoreFree(score);
     } else if (rdbtype == RDB_TYPE_LIST_QUICKLIST || rdbtype == RDB_TYPE_LIST_QUICKLIST_2) {
         if ((len = rdbLoadLen(rdb, NULL)) == RDB_LENERR) return NULL;
         if (len == 0) goto emptykey;

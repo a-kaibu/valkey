@@ -833,7 +833,8 @@ proc generate_fuzzy_traffic_on_key {key duration} {
     set list_commands {LINDEX LINSERT LLEN LPOP LPOS LPUSH LPUSHX LRANGE LREM LSET LTRIM RPOP RPOPLPUSH RPUSH RPUSHX}
     set set_commands {SADD SCARD SDIFF SDIFFSTORE SINTER SINTERSTORE SISMEMBER SMEMBERS SMOVE SPOP SRANDMEMBER SREM SSCAN SUNION SUNIONSTORE}
     set stream_commands {XACK XADD XCLAIM XDEL XGROUP XINFO XLEN XPENDING XRANGE XREAD XREADGROUP XREVRANGE XTRIM}
-    set commands [dict create string $string_commands hash $hash_commands zset $zset_commands list $list_commands set $set_commands stream $stream_commands]
+    set zvset_commands {ZVADD ZVCARD ZVCOUNT ZVINCRBY ZVINTERSTORE ZVLEXCOUNT ZVMSCORE ZVPOPMAX ZVPOPMIN ZVQUERY ZVRANDMEMBER ZVRANGE ZVRANGEBYLEX ZVRANGEBYSCORE ZVRANK ZVRANKBYSCORE ZVREM ZVREMRANGEBYLEX ZVREMRANGEBYRANK ZVREMRANGEBYSCORE ZVREVRANGE ZVREVRANGEBYLEX ZVREVRANGEBYSCORE ZVREVRANK ZVSCAN ZVSCORE ZVUNIONSTORE ZVDIFFSTORE}
+    set commands [dict create string $string_commands hash $hash_commands zset $zset_commands list $list_commands set $set_commands stream $stream_commands zvset $zvset_commands]
 
     set type [r type $key]
     set cmds [dict get $commands $type]
