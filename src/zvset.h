@@ -90,21 +90,23 @@ void zvScoreApplyWeight(zvScore *out, const zvScore *v, double weight);
  * A bare "-" is only valid as the lower bound (unbounded below) and a
  * bare "+" only as the upper bound (unbounded above); the reverse means
  * an empty range (never a full-range delete). The token side is recorded
- * so reversed infinities stay empty instead of collapsing to NULL/NULL. */
+ * so reversed infinities stay empty instead of collapsing to unbounded.
+ * Parsed in place without allocation; len is 0 for "-" and "+". */
 typedef struct zvScoreBound {
-    int unbounded;
     int exclusive;
     int neg_inf; /* "-" token */
     int pos_inf; /* "+" token */
-    zvScore *score; /* NULL when unbounded */
+    uint8_t len;
+    double values[ZVSET_MAX_DIMENSIONS];
 } zvScoreBound;
 
-/* Parse one bound token against the key's dimensions. */
-int zvParseScoreBound(const char *str, size_t len, uint8_t dims, zvScoreBound *bound);
-void zvFreeScoreBound(zvScoreBound *bound);
+/* Parse one bound token (syntax only; dimensions are checked against the
+ * key when the range is resolved). */
+int zvParseScoreBound(const char *str, size_t len, zvScoreBound *bound);
+/* Parse "v0#v1#..." into out (ZVSET_MAX_DIMENSIONS values). Returns the
+ * number of components, or 0 on error. */
+int zvScoreParseInto(const char *str, size_t len, double *out);
 
-/* P(s): score prefix [dims:u8][sortable...] without member. */
-sds zvBuildScorePrefix(const zvScore *score);
 /* Byte successor with carry (encoded-prefix space only, never decoded).
  * Returns NULL when the input is all 0xFF (unreachable for encoded
  * scores, since NaN is rejected). */
@@ -138,7 +140,9 @@ sds zvLexSeekKey(zvset *zs, const char *member, size_t member_len);
 /* Resolve protocol range bounds to half-open ranks [lo,hi). Both return
  * C_ERR on a malformed bound (or, for scores, a dimension mismatch).
  * BYLEX additionally requires zvsetUniformVector(). */
-int zvsetScoreRangeToRanks(zvset *zs, const char *min, size_t minlen, const char *max, size_t maxlen, unsigned long *lo, unsigned long *hi);
+int zvsetScoreRangeToRanks(zvset *zs, zvScoreBound *minb, zvScoreBound *maxb, unsigned long *lo, unsigned long *hi);
+/* Member count in [minb,maxb], or -1 when a bound does not fit the key. */
+long zvsetScoreRangeCount(zvset *zs, zvScoreBound *minb, zvScoreBound *maxb);
 int zvsetLexRangeToRanks(zvset *zs, const char *min, size_t minlen, const char *max, size_t maxlen, unsigned long *lo, unsigned long *hi);
 /* Rank score would take on insertion (ZVRANKBYSCORE/ZVREVRANKBYSCORE). */
 unsigned long zvsetRankByScore(zvset *zs, const zvScore *score, int reverse);

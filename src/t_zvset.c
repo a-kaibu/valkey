@@ -389,14 +389,15 @@ typedef enum {
 } zvRangeType;
 
 /* A parsed range request. min/max are the raw bound tokens (already in
- * min/max order, i.e. swapped for REV) for SCORE/LEX, and start/stop are
- * the indexes for RANK. */
+ * min/max order, i.e. swapped for REV) for SCORE/LEX, minb/maxb their
+ * parsed form for SCORE, and start/stop are the indexes for RANK. */
 typedef struct zvRangeSpec {
     zvRangeType type;
     int reverse;
     int withscores;
     long start, stop;
     sds min, max;
+    zvScoreBound minb, maxb;
     long offset; /* LIMIT offset, 0 without LIMIT. */
     long count;  /* LIMIT count, -1 (all) without LIMIT. */
 } zvRangeSpec;
@@ -463,21 +464,9 @@ static int zvLexBoundSyntaxOk(const char *str, size_t len) {
     return 0;
 }
 
-/* Syntax-only check for a BYSCORE bound (any dimension count). */
-static int zvScoreBoundSyntaxOk(const char *str, size_t len) {
-    if (len == 1 && (str[0] == '-' || str[0] == '+')) return 1;
-    if (len > 1 && str[0] == '(') {
-        str++;
-        len--;
-    }
-    zvScore *s = zvScoreParse(str, len);
-    if (s == NULL) return 0;
-    zvScoreFree(s);
-    return 1;
-}
-
-/* Read the range arguments at argv[idx], argv[idx+1] into r. Bounds are
- * validated syntactically so a missing key still reports malformed
+/* Read the range arguments at argv[idx], argv[idx+1] into r. Score
+ * bounds are parsed here (their dimension count is checked against the
+ * key later) and lex bounds validated syntactically, so a missing key still reports malformed
  * input, like ZSET. Returns C_OK, or C_ERR with a reply already sent. */
 static int zvParseRangeArgs(client *c, int idx, zvRangeSpec *r) {
     if (r->type == ZV_RANGE_RANK) {
@@ -490,7 +479,8 @@ static int zvParseRangeArgs(client *c, int idx, zvRangeSpec *r) {
     r->min = objectGetVal(c->argv[r->reverse ? idx + 1 : idx]);
     r->max = objectGetVal(c->argv[r->reverse ? idx : idx + 1]);
     if (r->type == ZV_RANGE_SCORE) {
-        if (!zvScoreBoundSyntaxOk(r->min, sdslen(r->min)) || !zvScoreBoundSyntaxOk(r->max, sdslen(r->max))) {
+        if (zvParseScoreBound(r->min, sdslen(r->min), &r->minb) != C_OK ||
+            zvParseScoreBound(r->max, sdslen(r->max), &r->maxb) != C_OK) {
             zvReplyScoreRangeError(c);
             return C_ERR;
         }
@@ -525,11 +515,11 @@ static void zvRankWindow(unsigned long len, long start, long stop, int reverse, 
 /* Resolve r against zs to the forward rank window [lo,hi). LIMIT and
  * direction are applied later by zvIterateRange(). Returns C_OK, or
  * C_ERR with a reply already sent. */
-static int zvResolveRange(client *c, zvset *zs, const zvRangeSpec *r, unsigned long *lo, unsigned long *hi) {
+static int zvResolveRange(client *c, zvset *zs, zvRangeSpec *r, unsigned long *lo, unsigned long *hi) {
     switch (r->type) {
     case ZV_RANGE_RANK: zvRankWindow(zvsetLength(zs), r->start, r->stop, r->reverse, lo, hi); return C_OK;
     case ZV_RANGE_SCORE:
-        if (zvsetScoreRangeToRanks(zs, r->min, sdslen(r->min), r->max, sdslen(r->max), lo, hi) != C_OK) {
+        if (zvsetScoreRangeToRanks(zs, &r->minb, &r->maxb, lo, hi) != C_OK) {
             zvReplyScoreRangeError(c);
             return C_ERR;
         }
@@ -675,15 +665,25 @@ void zvrevrangebylexCommand(client *c) {
     zvrangeGenericCommand(c, NULL, 1, ZV_RANGE_LEX, 1, ZV_OPT_LIMIT);
 }
 
-/* ZVCOUNT / ZVLEXCOUNT: size of the resolved rank window. */
+/* ZVCOUNT / ZVLEXCOUNT: number of items in the range. */
 static void zvcountGenericCommand(client *c, zvRangeType type) {
     zvRangeSpec r = {.type = type, .count = -1};
     robj *zobj;
 
     if (zvParseRangeArgs(c, 2, &r) != C_OK) return;
     if ((zobj = lookupKeyReadOrReply(c, c->argv[1], shared.czero)) == NULL || checkType(c, zobj, OBJ_ZVSET)) return;
+    zvset *zs = objectGetVal(zobj);
+    if (type == ZV_RANGE_SCORE) {
+        /* A single tree descent instead of two rank lookups. */
+        long count = zvsetScoreRangeCount(zs, &r.minb, &r.maxb);
+        if (count < 0)
+            zvReplyScoreRangeError(c);
+        else
+            addReplyLongLong(c, count);
+        return;
+    }
     unsigned long lo, hi;
-    if (zvResolveRange(c, objectGetVal(zobj), &r, &lo, &hi) != C_OK) return;
+    if (zvResolveRange(c, zs, &r, &lo, &hi) != C_OK) return;
     addReplyLongLong(c, (long long)(hi - lo));
 }
 

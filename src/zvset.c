@@ -38,48 +38,31 @@ double zvSortableToScore(uint64_t sortable) {
     return score;
 }
 
-/* Parse "v0#v1#...#vn" into zvScore. Returns NULL on any error.
- * Rejects: empty string, empty components, >255 components, NaN,
- * invalid floats. Allows +/-inf like ZSET. */
-zvScore *zvScoreParse(const char *str, size_t len) {
-    if (len == 0) return NULL;
-
-    /* Count components. */
-    size_t count = 1;
-    for (size_t i = 0; i < len; i++) {
-        if (str[i] == '#') count++;
-    }
-    if (count == 0 || count > ZVSET_MAX_DIMENSIONS) return NULL;
-
-    zvScore *score = zmalloc(sizeof(*score) + sizeof(double) * count);
-    score->len = (uint8_t)count;
-
-    size_t idx = 0;
+/* Parse "v0#v1#...#vn" into out (room for ZVSET_MAX_DIMENSIONS values).
+ * Returns the number of components, or 0 on any error: empty string or
+ * component, more than ZVSET_MAX_DIMENSIONS components, NaN or an invalid
+ * float. +/-inf are allowed like ZSET; -0 is canonicalized to +0. */
+int zvScoreParseInto(const char *str, size_t len, double *out) {
+    if (len == 0) return 0;
+    int count = 0;
     size_t start = 0;
     for (size_t i = 0; i <= len; i++) {
-        if (i == len || str[i] == '#') {
-            size_t clen = i - start;
-            if (clen == 0) {
-                zfree(score);
-                return NULL;
-            }
-            double v;
-            if (!string2d(str + start, clen, &v)) {
-                zfree(score);
-                return NULL;
-            }
-            /* string2d already rejects NaN, double-check. */
-            if (isnan(v)) {
-                zfree(score);
-                return NULL;
-            }
-            /* Canonicalize -0.0 to +0.0. */
-            if (v == 0.0) v = 0.0;
-            score->values[idx++] = v;
-            start = i + 1;
-        }
+        if (i < len && str[i] != '#') continue;
+        double v;
+        if (i == start || count == ZVSET_MAX_DIMENSIONS || !string2d(str + start, i - start, &v) || isnan(v))
+            return 0;
+        out[count++] = v == 0.0 ? 0.0 : v;
+        start = i + 1;
     }
-    serverAssert(idx == count);
+    return count;
+}
+
+zvScore *zvScoreParse(const char *str, size_t len) {
+    double values[ZVSET_MAX_DIMENSIONS];
+    int count = zvScoreParseInto(str, len, values);
+    if (count == 0) return NULL;
+    zvScore *score = zvScoreCreate((uint8_t)count);
+    memcpy(score->values, values, sizeof(double) * (size_t)count);
     return score;
 }
 
@@ -143,14 +126,12 @@ sds zvScoreFormat(const zvScore *score) {
 
 /* --- Score range bounds (BYSCORE) --- */
 
-int zvParseScoreBound(const char *str, size_t len, uint8_t dims, zvScoreBound *bound) {
-    bound->unbounded = 0;
+int zvParseScoreBound(const char *str, size_t len, zvScoreBound *bound) {
     bound->exclusive = 0;
     bound->neg_inf = 0;
     bound->pos_inf = 0;
-    bound->score = NULL;
+    bound->len = 0;
     if (len == 1 && (str[0] == '-' || str[0] == '+')) {
-        bound->unbounded = 1;
         if (str[0] == '-')
             bound->neg_inf = 1;
         else
@@ -162,39 +143,45 @@ int zvParseScoreBound(const char *str, size_t len, uint8_t dims, zvScoreBound *b
         str++;
         len--;
     }
-    zvScore *score = zvScoreParse(str, len);
-    if (score == NULL) return C_ERR;
-    if (score->len == 1 && dims > 1 && isinf(score->values[0])) {
-        /* A scalar infinity ("-inf", "+inf") stands for the vector with
-         * every component at that infinity, so TairZset style bounds work
-         * on multi-dimensional keys. */
-        double inf = score->values[0];
-        zvScoreFree(score);
-        score = zvScoreCreate(dims);
-        for (int i = 0; i < dims; i++) score->values[i] = inf;
-    }
-    if (score->len != dims) {
-        zvScoreFree(score);
-        return C_ERR;
-    }
-    bound->score = score;
+    int count = zvScoreParseInto(str, len, bound->values);
+    if (count == 0) return C_ERR;
+    bound->len = (uint8_t)count;
     return C_OK;
 }
 
-void zvFreeScoreBound(zvScoreBound *bound) {
-    if (bound->score) zvScoreFree(bound->score);
-    bound->score = NULL;
+/* Check a parsed bound against the key's dimensions. A scalar infinity
+ * ("-inf", "+inf") stands for the vector with every component at that
+ * infinity, so TairZset style bounds work on multi-dimensional keys. */
+static int zvScoreBoundFit(zvScoreBound *bound, uint8_t dims) {
+    if (bound->len == 0 || bound->len == dims) return C_OK;
+    if (bound->len != 1 || !isinf(bound->values[0])) return C_ERR;
+    for (int i = 1; i < dims; i++) bound->values[i] = bound->values[0];
+    bound->len = dims;
+    return C_OK;
 }
 
-sds zvBuildScorePrefix(const zvScore *score) {
-    size_t total = 1 + (size_t)score->len * 8;
-    sds prefix = sdsnewlen(NULL, total);
-    prefix[0] = (char)score->len;
-    for (int i = 0; i < score->len; i++) {
-        uint64_t sortable = zvScoreToSortable(score->values[i]);
-        memcpy(prefix + 1 + (size_t)i * 8, &sortable, 8);
+/* Encoded score prefix [dims][sortables] of values, written to buf
+ * (1 + 8 * ZVSET_MAX_DIMENSIONS bytes). Returns its length. */
+static size_t zvEncodePrefix(const double *values, uint8_t dims, char *buf) {
+    buf[0] = (char)dims;
+    for (int i = 0; i < dims; i++) {
+        uint64_t sortable = zvScoreToSortable(values[i]);
+        memcpy(buf + 1 + (size_t)i * 8, &sortable, 8);
     }
-    return prefix;
+    return 1 + (size_t)dims * 8;
+}
+
+/* In-place byte successor of buf[0..len): increment the last non-0xFF
+ * byte and truncate after it. Returns the new length, or 0 when every
+ * byte is 0xFF (unreachable for encoded prefixes, since NaN is rejected). */
+static size_t zvSuccessorInPlace(char *buf, size_t len) {
+    for (size_t i = len; i > 0; i--) {
+        if ((unsigned char)buf[i - 1] != 0xFF) {
+            buf[i - 1]++;
+            return i;
+        }
+    }
+    return 0;
 }
 
 /* Byte successor: increment the last non-0xFF byte and TRUNCATE
@@ -205,16 +192,14 @@ sds zvBuildScorePrefix(const zvScore *score) {
  * nothing is decoded. Returns NULL when the input is all 0xFF
  * (unreachable for encoded score prefixes, since NaN is rejected). */
 sds zvBoundSuccessor(const_sds bound) {
-    size_t len = sdslen(bound);
-    for (size_t i = len; i > 0; i--) {
-        unsigned char b = (unsigned char)bound[i - 1];
-        if (b != 0xFF) {
-            sds succ = sdsnewlen(bound, i);
-            succ[i - 1] = (char)(b + 1);
-            return succ;
-        }
+    sds succ = sdsdup(bound);
+    size_t len = zvSuccessorInPlace(succ, sdslen(succ));
+    if (len == 0) {
+        sdsfree(succ);
+        return NULL;
     }
-    return NULL;
+    sdssetlen(succ, len);
+    return succ;
 }
 
 void zvScoreRanks(zvset *zs, const_sds lower, const_sds upper, unsigned long *lo, unsigned long *hi) {
@@ -340,52 +325,35 @@ sds zvLexSeekKey(zvset *zs, const char *member, size_t member_len) {
     return key;
 }
 
-/* Resolve BYSCORE lower/upper bound SDS pair from parsed bounds.
- * Returns 1 with *empty=1 when the range is trivially empty.
- * Caller frees *lower and *upper (NULL when unbounded). */
-static int zvBuildScoreInterval(zvScoreBound *minb, zvScoreBound *maxb, sds *lower, sds *upper, int *empty) {
+/* Build the BYSCORE seek keys for [minb,maxb] (already fitted to the
+ * key's dimensions): items in range are those >= *lower and < *upper.
+ * NULL means unbounded. Returns 0 when the range is trivially empty.
+ * Caller frees *lower and *upper. */
+static int zvBuildScoreInterval(const zvScoreBound *minb, const zvScoreBound *maxb, sds *lower, sds *upper) {
     *lower = NULL;
     *upper = NULL;
-    *empty = 0;
     /* Reversed infinities ("+" as min or "-" as max) are empty, never
      * a full range. */
-    if (minb->pos_inf || maxb->neg_inf) {
-        *empty = 1;
-        return 1;
+    if (minb->pos_inf || maxb->neg_inf) return 0;
+    char buf[1 + 8 * ZVSET_MAX_DIMENSIONS];
+    if (minb->len) {
+        size_t len = zvEncodePrefix(minb->values, minb->len, buf);
+        /* Exclusive: skip every member with exactly this score. */
+        if (minb->exclusive && (len = zvSuccessorInPlace(buf, len)) == 0) return 0;
+        *lower = sdsnewlen(buf, len);
     }
-    if (!minb->unbounded && !maxb->unbounded) {
-        int cmp = zvScoreCompare(minb->score, maxb->score);
-        if (cmp > 0 || (cmp == 0 && (minb->exclusive || maxb->exclusive))) {
-            *empty = 1;
-            return 1;
-        }
+    if (maxb->len) {
+        size_t len = zvEncodePrefix(maxb->values, maxb->len, buf);
+        /* Inclusive: end after every member with exactly this score. An
+         * all-0xFF prefix has no successor and covers everything above. */
+        if (!maxb->exclusive) len = zvSuccessorInPlace(buf, len);
+        if (len) *upper = sdsnewlen(buf, len);
     }
-    if (!minb->unbounded) {
-        sds prefix = zvBuildScorePrefix(minb->score);
-        if (minb->exclusive) {
-            *lower = zvBoundSuccessor(prefix);
-            sdsfree(prefix);
-            if (*lower == NULL) {
-                /* Exclusive min beyond byte space: nothing can follow. */
-                *empty = 1;
-                return 1;
-            }
-        } else {
-            *lower = prefix;
-        }
-    }
-    if (!maxb->unbounded) {
-        sds prefix = zvBuildScorePrefix(maxb->score);
-        if (maxb->exclusive) {
-            *upper = prefix;
-        } else {
-            *upper = zvBoundSuccessor(prefix);
-            sdsfree(prefix);
-            if (*upper == NULL) {
-                /* Inclusive max covers everything above: unbounded. */
-                *upper = NULL;
-            }
-        }
+    if (*lower && *upper && sdscmp(*lower, *upper) >= 0) {
+        sdsfree(*lower);
+        sdsfree(*upper);
+        *lower = *upper = NULL;
+        return 0;
     }
     return 1;
 }
@@ -433,28 +401,37 @@ static int zvBuildLexInterval(zvset *zs, zvLexBound *minb, zvLexBound *maxb, sds
     return C_OK;
 }
 
-/* Resolve a BYSCORE [min,max] range (protocol tokens) to half-open ranks
- * [*lo,*hi). Returns C_ERR when a bound is invalid for the key. */
-int zvsetScoreRangeToRanks(zvset *zs, const char *min, size_t minlen, const char *max, size_t maxlen, unsigned long *lo, unsigned long *hi) {
-    zvScoreBound minb, maxb;
-    if (zvParseScoreBound(min, minlen, zs->dimensions, &minb) != C_OK) return C_ERR;
-    if (zvParseScoreBound(max, maxlen, zs->dimensions, &maxb) != C_OK) {
-        zvFreeScoreBound(&minb);
+/* Resolve parsed BYSCORE bounds to half-open ranks [*lo,*hi). Returns
+ * C_ERR when a bound does not fit the key's dimensions. */
+int zvsetScoreRangeToRanks(zvset *zs, zvScoreBound *minb, zvScoreBound *maxb, unsigned long *lo, unsigned long *hi) {
+    if (zvScoreBoundFit(minb, zs->dimensions) != C_OK || zvScoreBoundFit(maxb, zs->dimensions) != C_OK)
         return C_ERR;
-    }
     sds lower, upper;
-    int empty;
-    zvBuildScoreInterval(&minb, &maxb, &lower, &upper, &empty);
-    zvFreeScoreBound(&minb);
-    zvFreeScoreBound(&maxb);
-    if (empty) {
-        *lo = *hi = 0;
-    } else {
-        zvScoreRanks(zs, lower, upper, lo, hi);
-    }
+    *lo = *hi = 0;
+    if (zvBuildScoreInterval(minb, maxb, &lower, &upper)) zvScoreRanks(zs, lower, upper, lo, hi);
     sdsfree(lower);
     sdsfree(upper);
     return C_OK;
+}
+
+/* Number of members in parsed BYSCORE bounds, or -1 when a bound does not
+ * fit the key's dimensions. A bounded range is counted in one descent. */
+long zvsetScoreRangeCount(zvset *zs, zvScoreBound *minb, zvScoreBound *maxb) {
+    if (zvScoreBoundFit(minb, zs->dimensions) != C_OK || zvScoreBoundFit(maxb, zs->dimensions) != C_OK) return -1;
+    sds lower, upper;
+    unsigned long count = 0;
+    if (zvBuildScoreInterval(minb, maxb, &lower, &upper)) {
+        if (lower && upper) {
+            count = fbtreeCountRangeByValue(zs->tree, lower, upper, 0, 1);
+        } else {
+            unsigned long lo, hi;
+            zvScoreRanks(zs, lower, upper, &lo, &hi);
+            count = hi - lo;
+        }
+    }
+    sdsfree(lower);
+    sdsfree(upper);
+    return (long)count;
 }
 
 /* Resolve a BYLEX [min,max] range to half-open ranks [*lo,*hi). The
@@ -483,15 +460,18 @@ int zvsetLexRangeToRanks(zvset *zs, const char *min, size_t minlen, const char *
 /* Rank a score would take if inserted: before every equal score
  * (forward) or after every equal score (reverse, counted from the top). */
 unsigned long zvsetRankByScore(zvset *zs, const zvScore *score, int reverse) {
-    sds prefix = zvBuildScorePrefix(score);
+    char buf[1 + 8 * ZVSET_MAX_DIMENSIONS];
+    size_t len = zvEncodePrefix(score->values, score->len, buf);
     unsigned long lo, hi;
     if (!reverse) {
+        sds prefix = sdsnewlen(buf, len);
         zvScoreRanks(zs, NULL, prefix, &lo, &hi);
         sdsfree(prefix);
         return hi;
     }
-    sds succ = zvBoundSuccessor(prefix);
-    sdsfree(prefix);
+    /* An all-0xFF prefix has no successor: nothing ranks above it. */
+    if ((len = zvSuccessorInPlace(buf, len)) == 0) return 0;
+    sds succ = sdsnewlen(buf, len);
     zvScoreRanks(zs, succ, NULL, &lo, &hi);
     sdsfree(succ);
     return hi - lo;
