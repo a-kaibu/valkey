@@ -99,7 +99,9 @@ jobs:
         run: |
           sudo apt-get install -y tcl8.6
           # valkey-cli drives the server start/stop waits below.
-          make -j"$(nproc)" valkey-server valkey-cli
+          # One make in src/: the top-level Makefile would run one
+          # sub-make per goal in parallel and race.
+          make -j"$(nproc)" -C src valkey-server valkey-cli
           cp src/valkey-server /tmp/valkey-server-head
           git worktree add /tmp/base "${{ steps.base.outputs.sha }}"
           make -C /tmp/base -j"$(nproc)" valkey-server
