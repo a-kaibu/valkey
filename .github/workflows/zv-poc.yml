@@ -209,14 +209,22 @@ jobs:
       - name: Instruction counts (callgrind)
         run: |
           set -euo pipefail
+          # Logs are not downloadable here: report failures as annotations.
+          report() {
+            for f in /tmp/zset-ab/cg-*.log; do
+              [ -f "$f" ] && python3 -c 'import sys; t = open(sys.argv[1], errors="replace").read()[-3000:]; print("::error title=" + sys.argv[1] + "::" + t.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))' "$f"
+            done
+          }
+          trap report ERR
           for side in base head; do
             mkdir -p /tmp/zset-ab/ir-$side
             valgrind --tool=callgrind --callgrind-out-file=/tmp/zset-ab/ir-$side/cg.out \
-              /tmp/valkey-server-$side --port 7792 --save '' --appendonly no --logfile /tmp/zset-ab/cg-server.log &
+              /tmp/valkey-server-$side --port 7792 --save '' --appendonly no --logfile /tmp/zset-ab/cg-server.log \
+              2> /tmp/zset-ab/cg-valgrind.log &
             pid=$!
             timeout 120 bash -c 'until ./src/valkey-cli -p 7792 ping 2>/dev/null | grep -q PONG; do sleep 0.5; done'
             ZCMP_CALLGRIND_PID=$pid timeout 1800 tclsh utils/zset_compare_benchmark.tcl --port 7792 \
-              --n 3000 --repeats 1 --kinds z > /tmp/zset-ab/ir-$side.tsv
+              --n 3000 --repeats 1 --kinds z > /tmp/zset-ab/ir-$side.tsv 2> /tmp/zset-ab/cg-bench.log
             ./src/valkey-cli -p 7792 SHUTDOWN NOSAVE || true
             wait $pid || true
           done
@@ -227,7 +235,10 @@ jobs:
             | tee /tmp/zset-ab/summary.md >> "$GITHUB_STEP_SUMMARY"
           # Also as an annotation: readable through the checks API where
           # job logs and artifacts are not.
-          python3 -c 'import sys; t = open("/tmp/zset-ab/summary.md").read(); print("::notice title=zset-ab summary::" + t.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))'
+          # One annotation per section: a single long one gets truncated.
+          python3 -c 'import sys; t = open("/tmp/zset-ab/summary.md").read()
+          for i, sec in enumerate(t.split("\n## ")):
+              print(f"::notice title=zset-ab summary {i}::" + ("## " if i else "") + sec.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))'
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

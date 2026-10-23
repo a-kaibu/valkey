@@ -55,8 +55,10 @@ proc measure_payload {fd label command cmds repeats {prepare {}}} {
     set sorted [lsort -real $cpu]
     # Under valgrind --tool=callgrind, ZCMP_CALLGRIND_PID=<pid> dumps
     # the profile after every case, for instruction counts per case.
+    # --max-invoke-ms=0: wait for the server to wake up (serverCron) rather
+    # than ptrace it, which CI runners do not allow.
     if {[info exists ::env(ZCMP_CALLGRIND_PID)]} {
-        exec callgrind_control -d $label $::env(ZCMP_CALLGRIND_PID) >/dev/null 2>/dev/null
+        exec vgdb --pid=$::env(ZCMP_CALLGRIND_PID) --max-invoke-ms=0 dump $label >/dev/null 2>/dev/null
     }
     puts [join [list $label [zvbench::percentile $sorted 0.5] [lindex $sorted 0] [lindex $sorted end] \
         [zvbench::percentile [lsort -real $wall] 0.5] $repeats $iterations] \t]
