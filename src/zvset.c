@@ -116,17 +116,20 @@ int zvScoreIncrement(zvScore *result, const zvScore *base, const zvScore *delta)
     return C_OK;
 }
 
-/* Format a parsed vector as "v0#v1#...". */
-sds zvScoreFormat(const zvScore *score) {
-    /* fpconv_dtoa writes at most 24 bytes per component. Build the
-     * complete vector before allocating its SDS, avoiding repeated growth. */
-    char buf[ZVSET_MAX_DIMENSIONS * 25];
+/* Format a parsed vector as "v0#v1#..." into buf (at least
+ * ZVSET_SCORE_BUFLEN bytes). Returns the formatted length. */
+size_t zvScoreFormatBuf(const zvScore *score, char *buf) {
     size_t len = 0;
     for (int i = 0; i < score->len; i++) {
         if (i > 0) buf[len++] = '#';
         len += fpconv_dtoa(score->values[i], buf + len);
     }
-    return sdsnewlen(buf, len);
+    return len;
+}
+
+sds zvScoreFormat(const zvScore *score) {
+    char buf[ZVSET_SCORE_BUFLEN];
+    return sdsnewlen(buf, zvScoreFormatBuf(score, buf));
 }
 
 /* --- Score range bounds (BYSCORE) --- */
@@ -152,6 +155,15 @@ int zvParseScoreBound(const char *str, size_t len, uint8_t dims, zvScoreBound *b
     }
     zvScore *score = zvScoreParse(str, len);
     if (score == NULL) return C_ERR;
+    if (score->len == 1 && dims > 1 && isinf(score->values[0])) {
+        /* A scalar infinity ("-inf", "+inf") stands for the vector with
+         * every component at that infinity, so TairZset style bounds work
+         * on multi-dimensional keys. */
+        double inf = score->values[0];
+        zvScoreFree(score);
+        score = zvScoreCreate(dims);
+        for (int i = 0; i < dims; i++) score->values[i] = inf;
+    }
     if (score->len != dims) {
         zvScoreFree(score);
         return C_ERR;
@@ -319,6 +331,163 @@ sds zvLexSeekKey(zvset *zs, const char *member, size_t member_len) {
     return key;
 }
 
+/* Resolve BYSCORE lower/upper bound SDS pair from parsed bounds.
+ * Returns 1 with *empty=1 when the range is trivially empty.
+ * Caller frees *lower and *upper (NULL when unbounded). */
+static int zvBuildScoreInterval(zvScoreBound *minb, zvScoreBound *maxb, sds *lower, sds *upper, int *empty) {
+    *lower = NULL;
+    *upper = NULL;
+    *empty = 0;
+    /* Reversed infinities ("+" as min or "-" as max) are empty, never
+     * a full range. */
+    if (minb->pos_inf || maxb->neg_inf) {
+        *empty = 1;
+        return 1;
+    }
+    if (!minb->unbounded && !maxb->unbounded) {
+        int cmp = zvScoreCompare(minb->score, maxb->score);
+        if (cmp > 0 || (cmp == 0 && (minb->exclusive || maxb->exclusive))) {
+            *empty = 1;
+            return 1;
+        }
+    }
+    if (!minb->unbounded) {
+        sds prefix = zvBuildScorePrefix(minb->score);
+        if (minb->exclusive) {
+            *lower = zvBoundSuccessor(prefix);
+            sdsfree(prefix);
+            if (*lower == NULL) {
+                /* Exclusive min beyond byte space: nothing can follow. */
+                *empty = 1;
+                return 1;
+            }
+        } else {
+            *lower = prefix;
+        }
+    }
+    if (!maxb->unbounded) {
+        sds prefix = zvBuildScorePrefix(maxb->score);
+        if (maxb->exclusive) {
+            *upper = prefix;
+        } else {
+            *upper = zvBoundSuccessor(prefix);
+            sdsfree(prefix);
+            if (*upper == NULL) {
+                /* Inclusive max covers everything above: unbounded. */
+                *upper = NULL;
+            }
+        }
+    }
+    return 1;
+}
+
+/* Build [lower,upper) seek keys for uniform-vector BYLEX. Member bounds
+ * use a trailing NUL byte instead of a carry successor (which is only
+ * valid for fixed-length score prefixes): exclusive lower "a" seeks
+ * "a\0" (first strictly greater member, so "ab" is kept), while
+ * inclusive upper "a" ends exclusively at "a\0" (so "ab" is excluded).
+ * Returns C_OK; *empty is set when the range is trivially empty. The
+ * key must be non-empty and uniform (checked by the caller). */
+static int zvBuildLexInterval(zvset *zs, zvLexBound *minb, zvLexBound *maxb, sds *lower, sds *upper, int *empty) {
+    *lower = NULL;
+    *upper = NULL;
+    *empty = 0;
+    /* Reversed infinities ("+" as min or "-" as max) are empty, never
+     * a full range. */
+    if (minb->pos_inf || maxb->neg_inf) {
+        *empty = 1;
+        return C_OK;
+    }
+    if (!minb->unbounded && !maxb->unbounded) {
+        int cmp = zvLexMemberCompare(minb->member, sdslen(minb->member), maxb->member, sdslen(maxb->member));
+        if (cmp > 0 || (cmp == 0 && (minb->exclusive || maxb->exclusive))) {
+            *empty = 1;
+            return C_OK;
+        }
+    }
+    if (!minb->unbounded) {
+        sds key = zvLexSeekKey(zs, minb->member, sdslen(minb->member));
+        if (minb->exclusive) {
+            *lower = sdscatlen(key, "\0", 1);
+        } else {
+            *lower = key;
+        }
+    }
+    if (!maxb->unbounded) {
+        sds key = zvLexSeekKey(zs, maxb->member, sdslen(maxb->member));
+        if (maxb->exclusive) {
+            *upper = key;
+        } else {
+            *upper = sdscatlen(key, "\0", 1);
+        }
+    }
+    return C_OK;
+}
+
+/* Resolve a BYSCORE [min,max] range (protocol tokens) to half-open ranks
+ * [*lo,*hi). Returns C_ERR when a bound is invalid for the key. */
+int zvsetScoreRangeToRanks(zvset *zs, const char *min, size_t minlen, const char *max, size_t maxlen, unsigned long *lo, unsigned long *hi) {
+    zvScoreBound minb, maxb;
+    if (zvParseScoreBound(min, minlen, zs->dimensions, &minb) != C_OK) return C_ERR;
+    if (zvParseScoreBound(max, maxlen, zs->dimensions, &maxb) != C_OK) {
+        zvFreeScoreBound(&minb);
+        return C_ERR;
+    }
+    sds lower, upper;
+    int empty;
+    zvBuildScoreInterval(&minb, &maxb, &lower, &upper, &empty);
+    zvFreeScoreBound(&minb);
+    zvFreeScoreBound(&maxb);
+    if (empty) {
+        *lo = *hi = 0;
+    } else {
+        zvScoreRanks(zs, lower, upper, lo, hi);
+    }
+    sdsfree(lower);
+    sdsfree(upper);
+    return C_OK;
+}
+
+/* Resolve a BYLEX [min,max] range to half-open ranks [*lo,*hi). The
+ * caller must check zvsetUniformVector() first. Returns C_ERR when a
+ * bound is malformed. */
+int zvsetLexRangeToRanks(zvset *zs, const char *min, size_t minlen, const char *max, size_t maxlen, unsigned long *lo, unsigned long *hi) {
+    *lo = *hi = 0;
+    if (zvsetLength(zs) == 0) return C_OK;
+    zvLexBound minb, maxb;
+    if (zvParseLexBound(min, minlen, &minb) != C_OK) return C_ERR;
+    if (zvParseLexBound(max, maxlen, &maxb) != C_OK) {
+        zvFreeLexBound(&minb);
+        return C_ERR;
+    }
+    sds lower, upper;
+    int empty;
+    zvBuildLexInterval(zs, &minb, &maxb, &lower, &upper, &empty);
+    zvFreeLexBound(&minb);
+    zvFreeLexBound(&maxb);
+    if (!empty) zvScoreRanks(zs, lower, upper, lo, hi);
+    sdsfree(lower);
+    sdsfree(upper);
+    return C_OK;
+}
+
+/* Rank a score would take if inserted: before every equal score
+ * (forward) or after every equal score (reverse, counted from the top). */
+unsigned long zvsetRankByScore(zvset *zs, const zvScore *score, int reverse) {
+    sds prefix = zvBuildScorePrefix(score);
+    unsigned long lo, hi;
+    if (!reverse) {
+        zvScoreRanks(zs, NULL, prefix, &lo, &hi);
+        sdsfree(prefix);
+        return hi;
+    }
+    sds succ = zvBoundSuccessor(prefix);
+    sdsfree(prefix);
+    zvScoreRanks(zs, succ, NULL, &lo, &hi);
+    sdsfree(succ);
+    return hi - lo;
+}
+
 /* Create packed fbtree item: [dims:u8][sortable...][member]. */
 sds zvItemCreate(const zvScore *score, const char *member, size_t member_len) {
     size_t total = 1 + (size_t)score->len * 8 + member_len;
@@ -354,7 +523,7 @@ double zvItemScoreAt(const_sds item, uint8_t dimension) {
 
 /* Compare only as far as the first differing component. Packed scores
  * are canonical and byte ordered, so GT/LT need no decoded allocation. */
-static int zvItemScoreCompare(const_sds item, const zvScore *score) {
+int zvItemScoreCompare(const_sds item, const zvScore *score) {
     serverAssert((uint8_t)item[0] == score->len);
     for (int i = 0; i < score->len; i++) {
         uint64_t sortable = zvScoreToSortable(score->values[i]);
@@ -364,38 +533,30 @@ static int zvItemScoreCompare(const_sds item, const zvScore *score) {
     return 0;
 }
 
+/* The encoded form is canonical (-0 normalized at parse and pack time),
+ * so equality is a byte comparison. */
 int zvItemScoreEquals(const_sds item, const zvScore *score) {
-    uint8_t dims = (uint8_t)item[0];
-    if (dims != score->len) return 0;
-    /* Fast path: memcmp encoded prefix. Encoded form is canonical
-     * (-0 normalized at both parse and pack time). */
-    size_t prefix = (size_t)dims * 8;
-    /* Build encoded buffer on stack for comparison without full decode.
-     * For dims <= 32 use stack, else fallback to per-score compare. */
-    if (dims <= 32) {
-        uint64_t buf[32];
-        for (int i = 0; i < dims; i++) buf[i] = zvScoreToSortable(score->values[i]);
-        return memcmp(item + 1, buf, prefix) == 0;
-    }
-    for (int i = 0; i < dims; i++) {
-        uint64_t sortable;
-        memcpy(&sortable, item + 1 + (size_t)i * 8, 8);
-        if (sortable != zvScoreToSortable(score->values[i])) return 0;
-    }
-    return 1;
+    if ((uint8_t)item[0] != score->len) return 0;
+    return zvItemScoreCompare(item, score) == 0;
 }
 
-/* Format vector as "v0#v1#...". Uses fpconv_dtoa like ZSET replies. */
-sds zvItemFormatScore(const_sds item) {
+/* Format a packed item's vector as "v0#v1#..." into buf (at least
+ * ZVSET_SCORE_BUFLEN bytes). Uses fpconv_dtoa like ZSET replies. */
+size_t zvItemFormatScoreBuf(const_sds item, char *buf) {
     uint8_t dims = (uint8_t)item[0];
-    char buf[ZVSET_MAX_DIMENSIONS * 25];
     size_t len = 0;
     for (int i = 0; i < dims; i++) {
+        uint64_t sortable;
+        memcpy(&sortable, item + 1 + (size_t)i * 8, sizeof(sortable));
         if (i > 0) buf[len++] = '#';
-        double v = zvItemScoreAt(item, (uint8_t)i);
-        len += fpconv_dtoa(v, buf + len);
+        len += fpconv_dtoa(zvSortableToScore(sortable), buf + len);
     }
-    return sdsnewlen(buf, len);
+    return len;
+}
+
+sds zvItemFormatScore(const_sds item) {
+    char buf[ZVSET_SCORE_BUFLEN];
+    return sdsnewlen(buf, zvItemFormatScoreBuf(item, buf));
 }
 
 /* --- Hashtable support ---
@@ -570,20 +731,16 @@ int zvsetIncrBy(zvset *zs, const zvScore *delta, sds member, int in_flags, int *
             *out_flags |= ZVADD_OUT_NOP;
             return C_OK;
         }
-        zvScore *cur = zvScoreCreate(zs->dimensions);
-        zvsetItemToScore(*item_ref, cur);
-        if (zvScoreIncrement(newscore, cur, delta) != C_OK) {
-            zvScoreFree(cur);
-            return C_ERR;
-        }
-        int cmp = zvScoreCompare(newscore, cur);
-        zvScoreFree(cur);
-        if ((gt && cmp <= 0) || (lt && cmp >= 0)) {
+        zvsetItemToScore(*item_ref, newscore);
+        if (zvScoreIncrement(newscore, newscore, delta) != C_OK) return C_ERR;
+        /* cmp is the old score relative to the new one. */
+        int cmp = zvItemScoreCompare(*item_ref, newscore);
+        if ((gt && cmp >= 0) || (lt && cmp <= 0)) {
             *out_flags |= ZVADD_OUT_NOP;
             return C_OK;
         }
         /* Skip delete/insert when the result is identical. */
-        if (zvItemScoreEquals(*item_ref, newscore)) return C_OK;
+        if (cmp == 0) return C_OK;
         zvsetReplaceItem(zs, item_ref, newscore, member);
         *out_flags |= ZVADD_OUT_UPDATED;
         return C_OK;

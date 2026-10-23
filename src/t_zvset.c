@@ -15,6 +15,22 @@
 
 #include <strings.h>
 
+/* Reply with a packed item's vector score without a temporary SDS. */
+static void addReplyZvScore(client *c, const_sds item) {
+    char buf[ZVSET_SCORE_BUFLEN];
+    addReplyBulkCBuffer(c, buf, zvItemFormatScoreBuf(item, buf));
+}
+
+/* Reply with one range element: member, plus the score with WITHSCORES.
+ * RESP3 nests [member, score] pairs like ZRANGE; RESP2 stays flat. */
+static void addReplyZvElement(client *c, const_sds item, int withscores) {
+    size_t member_len;
+    const char *member = zvItemMember(item, &member_len);
+    if (withscores && c->resp > 2) addReplyArrayLen(c, 2);
+    addReplyBulkCBuffer(c, member, member_len);
+    if (withscores) addReplyZvScore(c, item);
+}
+
 /* ZVADD key [NX|XX] [GT|LT] [CH] [INCR] score member [score member ...]
  *
  * score is "v0#v1#...#vn" (Tair style). The storage representation is
@@ -29,8 +45,9 @@ static void zvaddGenericCommand(client *c, int base_flags) {
     int elements;
     int j;
 
-    /* Parse optional flags. Accept NX/XX/GT/LT/CH/INCR in any order. */
-    while (scoreidx < c->argc) {
+    /* Parse optional flags. Accept NX/XX/GT/LT/CH/INCR in any order.
+     * ZVINCRBY (base INCR) takes no options. */
+    while (!(base_flags & ZVADD_IN_INCR) && scoreidx < c->argc) {
         char *opt = objectGetVal(c->argv[scoreidx]);
         if (!strcasecmp(opt, "nx")) {
             in_flags |= ZVADD_IN_NX;
@@ -160,7 +177,7 @@ static void zvaddGenericCommand(client *c, int base_flags) {
 
     if (added || updated) {
         signalModifiedKey(c, c->db, key);
-        notifyKeyspaceEvent(NOTIFY_GENERIC, incr ? "zvincrby" : "zvadd", key, c->db->id);
+        notifyKeyspaceEvent(NOTIFY_ZSET, incr ? "zvincrby" : "zvadd", key, c->db->id);
         server.dirty += (added + updated);
     }
     if (reply_err) {
@@ -168,8 +185,8 @@ static void zvaddGenericCommand(client *c, int base_flags) {
         addReplyError(c, "increment would produce NaN");
     } else if (incr) {
         if (processed) {
-            sds formatted = zvScoreFormat(incr_result);
-            addReplyBulkSds(c, formatted);
+            char buf[ZVSET_SCORE_BUFLEN];
+            addReplyBulkCBuffer(c, buf, zvScoreFormatBuf(incr_result, buf));
         } else {
             addReplyNull(c);
         }
@@ -217,7 +234,8 @@ void zvremCommand(client *c) {
 
     if (deleted) {
         signalModifiedKey(c, c->db, key);
-        notifyKeyspaceEvent(NOTIFY_GENERIC, "zvrem", key, c->db->id);
+        notifyKeyspaceEvent(NOTIFY_ZSET, "zvrem", key, c->db->id);
+        if (keyremoved) notifyKeyspaceEvent(NOTIFY_GENERIC, "del", key, c->db->id);
         server.dirty += deleted;
     }
     addReplyLongLong(c, deleted);
@@ -236,8 +254,7 @@ void zvscoreCommand(client *c) {
         addReplyNull(c);
         return;
     }
-    sds formatted = zvItemFormatScore(entry);
-    addReplyBulkSds(c, formatted);
+    addReplyZvScore(c, entry);
 }
 
 void zvmscoreCommand(client *c) {
@@ -262,8 +279,7 @@ void zvmscoreCommand(client *c) {
             addReplyNull(c);
             continue;
         }
-        sds formatted = zvItemFormatScore(entry);
-        addReplyBulkSds(c, formatted);
+        addReplyZvScore(c, entry);
     }
 }
 
@@ -303,8 +319,7 @@ static void zvrankGenericCommand(client *c, int reverse) {
     }
     addReplyArrayLen(c, 2);
     addReplyLongLong(c, rank);
-    sds formatted = zvItemFormatScore(entry);
-    addReplyBulkSds(c, formatted);
+    addReplyZvScore(c, entry);
 }
 
 void zvrankCommand(client *c) {
@@ -315,179 +330,78 @@ void zvrevrankCommand(client *c) {
     zvrankGenericCommand(c, 1);
 }
 
-/* Unified ZVRANGE core. Rank mode uses start/stop indexes; BYSCORE mode
- * uses already-parsed bounds. RESP array length is computed up front. */
-typedef struct zvRangeEmitCtx {
-    client *c;
-    int withscores;
-} zvRangeEmitCtx;
+typedef enum {
+    ZV_RANGE_RANK,
+    ZV_RANGE_SCORE,
+    ZV_RANGE_LEX,
+} zvRangeType;
 
-static void zvRangeEmitClient(void *ctx, const_sds item) {
-    zvRangeEmitCtx *ectx = ctx;
-    size_t member_len;
-    const char *member = zvItemMember(item, &member_len);
-    /* RESP3 nests [member, score] pairs like ZRANGE; RESP2 stays flat. */
-    if (ectx->withscores && ectx->c->resp > 2) addReplyArrayLen(ectx->c, 2);
-    addReplyBulkCBuffer(ectx->c, member, member_len);
-    if (ectx->withscores) {
-        sds formatted = zvItemFormatScore(item);
-        addReplyBulkSds(ectx->c, formatted);
-    }
-}
-
-static unsigned long zvRangeResultCount(unsigned long lo, unsigned long hi, int reverse, long offset, long count) {
-    if (lo >= hi) return 0;
-    if (offset < 0) offset = 0;
-    if (!reverse) {
-        unsigned long start = lo + (unsigned long)offset;
-        if (start >= hi) return 0;
-        unsigned long n = hi - start;
-        if (count >= 0 && n > (unsigned long)count) n = (unsigned long)count;
-        return n;
-    }
-    long start = (long)hi - 1 - offset;
-    if (start < (long)lo) return 0;
-    unsigned long n = (unsigned long)(start - (long)lo) + 1;
-    if (count >= 0 && n > (unsigned long)count) n = (unsigned long)count;
-    return n;
-}
-
-/* Emit [lo,hi) with direction/limit. All rank normalization and bound
- * resolution must be done by the caller. */
-static void zvrangeReply(client *c, zvset *zs, unsigned long lo, unsigned long hi, int reverse, long offset, long count, int withscores) {
-    unsigned long n = zvRangeResultCount(lo, hi, reverse, offset, count);
-    /* RESP3 nests [member, score] pairs like ZRANGE; RESP2 stays flat. */
-    addReplyArrayLen(c, (withscores && c->resp <= 2) ? n * 2 : n);
-    if (n == 0) return;
-    zvRangeEmitCtx ctx = {c, withscores};
-    zvIterateRange(zs, lo, hi, reverse, offset, count, zvRangeEmitClient, &ctx);
-}
-
-/* Resolve BYSCORE lower/upper bound SDS pair from parsed bounds.
- * Returns 1 with *empty=1 when the range is trivially empty.
- * Caller frees *lower and *upper (NULL when unbounded). */
-static int zvBuildScoreInterval(zvScoreBound *minb, zvScoreBound *maxb, sds *lower, sds *upper, int *empty) {
-    *lower = NULL;
-    *upper = NULL;
-    *empty = 0;
-    /* Reversed infinities ("+" as min or "-" as max) are empty, never
-     * a full range. */
-    if (minb->pos_inf || maxb->neg_inf) {
-        *empty = 1;
-        return 1;
-    }
-    if (!minb->unbounded && !maxb->unbounded) {
-        int cmp = zvScoreCompare(minb->score, maxb->score);
-        if (cmp > 0 || (cmp == 0 && (minb->exclusive || maxb->exclusive))) {
-            *empty = 1;
-            return 1;
-        }
-    }
-    if (!minb->unbounded) {
-        sds prefix = zvBuildScorePrefix(minb->score);
-        if (minb->exclusive) {
-            *lower = zvBoundSuccessor(prefix);
-            sdsfree(prefix);
-            if (*lower == NULL) {
-                /* Exclusive min beyond byte space: nothing can follow. */
-                *empty = 1;
-                return 1;
-            }
-        } else {
-            *lower = prefix;
-        }
-    }
-    if (!maxb->unbounded) {
-        sds prefix = zvBuildScorePrefix(maxb->score);
-        if (maxb->exclusive) {
-            *upper = prefix;
-        } else {
-            *upper = zvBoundSuccessor(prefix);
-            sdsfree(prefix);
-            if (*upper == NULL) {
-                /* Inclusive max covers everything above: unbounded. */
-                *upper = NULL;
-            }
-        }
-    }
-    return 1;
-}
-
-/* Forward declarations for the shared range cores. */
-static void zvrangeRankCore(client *c, robj *zobj, long start, long stop, int reverse, int withscores);
-static int zvrangeScoreCore(client *c, robj *zobj, const char *minraw, size_t minlen, const char *maxraw, size_t maxlen, int reverse, int withscores, int has_limit, long offset, long count);
-static int zvrangeLexCore(client *c, robj *zobj, const char *minraw, size_t minlen, const char *maxraw, size_t maxlen, int reverse, int withscores, int has_limit, long offset, long count);
-
-/* Parsed trailing range options shared by ZVRANGE/ZVRANGESTORE. */
-typedef struct zvRangeOpts {
-    int mode; /* 0 = rank, 1 = byscore, 2 = bylex */
+/* A parsed range request. min/max are the raw bound tokens (already in
+ * min/max order, i.e. swapped for REV) for SCORE/LEX, and start/stop are
+ * the indexes for RANK. */
+typedef struct zvRangeSpec {
+    zvRangeType type;
     int reverse;
     int withscores;
-    int has_limit;
-    long offset;
-    long count;
-} zvRangeOpts;
+    long start, stop;
+    sds min, max;
+    long offset; /* LIMIT offset, 0 without LIMIT. */
+    long count;  /* LIMIT count, -1 (all) without LIMIT. */
+} zvRangeSpec;
 
-/* Parse c->argv[first..argc) as range options. allow_withscores gates
- * WITHSCORES (rejected for STORE). Returns C_OK, or C_ERR with a reply
- * already sent. LIMIT requires BYSCORE/BYLEX. */
-static int zvRangeParseOpts(client *c, int first, int allow_withscores, zvRangeOpts *o) {
-    o->mode = 0;
-    o->reverse = 0;
-    o->withscores = 0;
-    o->has_limit = 0;
-    o->offset = 0;
-    o->count = -1;
-    int idx = first;
-    while (idx < c->argc) {
-        char *opt = objectGetVal(c->argv[idx]);
-        if (!strcasecmp(opt, "byscore")) {
-            if (o->mode != 0) {
-                addReplyErrorObject(c, shared.syntaxerr);
+/* Option groups accepted by zvParseRangeOptions(). */
+#define ZV_OPT_BY (1 << 0)
+#define ZV_OPT_REV (1 << 1)
+#define ZV_OPT_WITHSCORES (1 << 2)
+#define ZV_OPT_LIMIT (1 << 3)
+
+/* Parse c->argv[first..argc) as range options restricted to 'allowed'.
+ * Returns C_OK, or C_ERR with a reply already sent. */
+static int zvParseRangeOptions(client *c, int first, int allowed, zvRangeSpec *r) {
+    int has_limit = 0;
+    for (int j = first; j < c->argc; j++) {
+        char *opt = objectGetVal(c->argv[j]);
+        int moreargs = c->argc - 1 - j;
+        if ((allowed & ZV_OPT_BY) && r->type == ZV_RANGE_RANK && !strcasecmp(opt, "byscore")) {
+            r->type = ZV_RANGE_SCORE;
+        } else if ((allowed & ZV_OPT_BY) && r->type == ZV_RANGE_RANK && !strcasecmp(opt, "bylex")) {
+            r->type = ZV_RANGE_LEX;
+        } else if ((allowed & ZV_OPT_REV) && !strcasecmp(opt, "rev")) {
+            r->reverse = 1;
+        } else if ((allowed & ZV_OPT_WITHSCORES) && !strcasecmp(opt, "withscores")) {
+            r->withscores = 1;
+        } else if ((allowed & ZV_OPT_LIMIT) && !has_limit && moreargs >= 2 && !strcasecmp(opt, "limit")) {
+            if (getLongFromObjectOrReply(c, c->argv[j + 1], &r->offset, NULL) != C_OK ||
+                getLongFromObjectOrReply(c, c->argv[j + 2], &r->count, NULL) != C_OK)
                 return C_ERR;
-            }
-            o->mode = 1;
-            idx++;
-        } else if (!strcasecmp(opt, "bylex")) {
-            if (o->mode != 0) {
-                addReplyErrorObject(c, shared.syntaxerr);
-                return C_ERR;
-            }
-            o->mode = 2;
-            idx++;
-        } else if (!strcasecmp(opt, "rev")) {
-            o->reverse = 1;
-            idx++;
-        } else if (!strcasecmp(opt, "withscores")) {
-            if (!allow_withscores) {
-                addReplyErrorObject(c, shared.syntaxerr);
-                return C_ERR;
-            }
-            o->withscores = 1;
-            idx++;
-        } else if (!strcasecmp(opt, "limit")) {
-            if (o->has_limit || idx + 2 >= c->argc) {
-                addReplyErrorObject(c, shared.syntaxerr);
-                return C_ERR;
-            }
-            if (getLongFromObjectOrReply(c, c->argv[idx + 1], &o->offset, NULL) != C_OK) return C_ERR;
-            if (getLongFromObjectOrReply(c, c->argv[idx + 2], &o->count, NULL) != C_OK) return C_ERR;
-            if (o->offset < 0) {
+            if (r->offset < 0) {
                 addReplyError(c, "LIMIT offset must be non-negative");
                 return C_ERR;
             }
-            o->has_limit = 1;
-            idx += 3;
+            has_limit = 1;
+            j += 2;
         } else {
             addReplyErrorObject(c, shared.syntaxerr);
             return C_ERR;
         }
     }
-    if (o->has_limit && o->mode == 0) {
+    if (has_limit && r->type == ZV_RANGE_RANK) {
         addReplyError(c, "LIMIT is only supported with BYSCORE or BYLEX");
         return C_ERR;
     }
     return C_OK;
+}
+
+static void zvReplyScoreRangeError(client *c) {
+    addReplyError(c, "invalid vector score range");
+}
+
+static void zvReplyLexRangeError(client *c) {
+    addReplyError(c, "min or max not valid string range item");
+}
+
+static void zvReplyBylexUniformError(client *c) {
+    addReplyError(c, "BYLEX requires all members to share the same vector score");
 }
 
 /* Syntax-only check for a BYLEX bound. */
@@ -510,65 +424,29 @@ static int zvScoreBoundSyntaxOk(const char *str, size_t len) {
     return 1;
 }
 
-void zvrangeCommand(client *c) {
-    robj *key = c->argv[1];
-    robj *zobj;
-    long start = 0, stop = -1;
-    zvRangeOpts o;
-
-    if (c->argc < 4) {
-        addReplyErrorObject(c, shared.syntaxerr);
-        return;
+/* Read the range arguments at argv[idx], argv[idx+1] into r. Bounds are
+ * validated syntactically so a missing key still reports malformed
+ * input, like ZSET. Returns C_OK, or C_ERR with a reply already sent. */
+static int zvParseRangeArgs(client *c, int idx, zvRangeSpec *r) {
+    if (r->type == ZV_RANGE_RANK) {
+        if (getLongFromObjectOrReply(c, c->argv[idx], &r->start, NULL) != C_OK ||
+            getLongFromObjectOrReply(c, c->argv[idx + 1], &r->stop, NULL) != C_OK)
+            return C_ERR;
+        return C_OK;
     }
-    if (zvRangeParseOpts(c, 4, 1, &o) != C_OK) return;
-
-    sds bound_min_raw = NULL, bound_max_raw = NULL;
-    size_t bound_min_len = 0, bound_max_len = 0;
-    if (o.mode == 0) {
-        if (getLongFromObjectOrReply(c, c->argv[2], &start, NULL) != C_OK) return;
-        if (getLongFromObjectOrReply(c, c->argv[3], &stop, NULL) != C_OK) return;
-    } else {
-        /* REV takes max first, like ZRANGE. */
-        int minarg = o.reverse ? 3 : 2;
-        int maxarg = o.reverse ? 2 : 3;
-        bound_min_raw = objectGetVal(c->argv[minarg]);
-        bound_min_len = sdslen(bound_min_raw);
-        bound_max_raw = objectGetVal(c->argv[maxarg]);
-        bound_max_len = sdslen(bound_max_raw);
-        /* Validate bound syntax even for missing keys. */
-        if (o.mode == 1) {
-            if (!zvScoreBoundSyntaxOk(bound_min_raw, bound_min_len) ||
-                !zvScoreBoundSyntaxOk(bound_max_raw, bound_max_len)) {
-                addReplyError(c, "invalid vector score range");
-                return;
-            }
-        } else {
-            if (!zvLexBoundSyntaxOk(bound_min_raw, bound_min_len) ||
-                !zvLexBoundSyntaxOk(bound_max_raw, bound_max_len)) {
-                addReplyError(c, "min or max not valid string range item");
-                return;
-            }
+    /* Reversed commands take max first. */
+    r->min = objectGetVal(c->argv[r->reverse ? idx + 1 : idx]);
+    r->max = objectGetVal(c->argv[r->reverse ? idx : idx + 1]);
+    if (r->type == ZV_RANGE_SCORE) {
+        if (!zvScoreBoundSyntaxOk(r->min, sdslen(r->min)) || !zvScoreBoundSyntaxOk(r->max, sdslen(r->max))) {
+            zvReplyScoreRangeError(c);
+            return C_ERR;
         }
+    } else if (!zvLexBoundSyntaxOk(r->min, sdslen(r->min)) || !zvLexBoundSyntaxOk(r->max, sdslen(r->max))) {
+        zvReplyLexRangeError(c);
+        return C_ERR;
     }
-    if ((zobj = lookupKeyReadOrReply(c, key, shared.emptyarray)) == NULL || checkType(c, zobj, OBJ_ZVSET))
-        return;
-    if (o.mode == 0) {
-        zvrangeRankCore(c, zobj, start, stop, o.reverse, o.withscores);
-        return;
-    }
-    if (o.mode == 1) {
-        if (zvrangeScoreCore(c, zobj, bound_min_raw, bound_min_len, bound_max_raw, bound_max_len, o.reverse,
-                             o.withscores, o.has_limit, o.offset, o.count) != C_OK) {
-            addReplyError(c, "invalid vector score range");
-            return;
-        }
-        return;
-    }
-    if (zvrangeLexCore(c, zobj, bound_min_raw, bound_min_len, bound_max_raw, bound_max_len, o.reverse,
-                       o.withscores, o.has_limit, o.offset, o.count) != C_OK) {
-        /* Error reply already sent by the core. */
-        return;
-    }
+    return C_OK;
 }
 
 /* Normalize [start,stop] rank bounds against len. With reverse, ranks
@@ -592,462 +470,210 @@ static void zvRankWindow(unsigned long len, long start, long stop, int reverse, 
     }
 }
 
-/* Rank core shared by ZVRANGE/ZVREVRANGE. */
-static void zvrangeRankCore(client *c, robj *zobj, long start, long stop, int reverse, int withscores) {
-    zvset *zs = objectGetVal(zobj);
-    unsigned long lo, hi;
-    zvRankWindow(zvsetLength(zs), start, stop, reverse, &lo, &hi);
-    zvrangeReply(c, zs, lo, hi, reverse, 0, -1, withscores);
-}
-
-/* BYSCORE core shared by ZVRANGE/ZVRANGEBYSCORE/ZVREVRANGEBYSCORE.
- * Returns C_OK, or C_ERR when bounds are invalid for the key. */
-static int zvrangeScoreCore(client *c, robj *zobj, const char *minraw, size_t minlen, const char *maxraw, size_t maxlen, int reverse, int withscores, int has_limit, long offset, long count) {
-    zvset *zs = objectGetVal(zobj);
-    zvScoreBound minb = {0}, maxb = {0};
-    if (zvParseScoreBound(minraw, minlen, zs->dimensions, &minb) != C_OK ||
-        zvParseScoreBound(maxraw, maxlen, zs->dimensions, &maxb) != C_OK) {
-        zvFreeScoreBound(&minb);
-        zvFreeScoreBound(&maxb);
-        return C_ERR;
-    }
-    sds lower = NULL, upper = NULL;
-    int empty = 0;
-    zvBuildScoreInterval(&minb, &maxb, &lower, &upper, &empty);
-    zvFreeScoreBound(&minb);
-    zvFreeScoreBound(&maxb);
-    if (empty) {
-        if (lower) sdsfree(lower);
-        if (upper) sdsfree(upper);
-        addReplyArrayLen(c, 0);
-        return C_OK;
-    }
-    unsigned long lo, hi;
-    zvScoreRanks(zs, lower, upper, &lo, &hi);
-    if (lower) sdsfree(lower);
-    if (upper) sdsfree(upper);
-    long lim_off = has_limit ? offset : 0;
-    long lim_cnt = has_limit ? count : -1;
-    zvrangeReply(c, zs, lo, hi, reverse, lim_off, lim_cnt, withscores);
-    return C_OK;
-}
-
-void zvrevrangeCommand(client *c) {
-    robj *key = c->argv[1];
-    robj *zobj;
-    long start, stop;
-    int withscores = 0;
-
-    if (c->argc < 4 || c->argc > 5) {
-        addReplyErrorObject(c, shared.syntaxerr);
-        return;
-    }
-    if (getLongFromObjectOrReply(c, c->argv[2], &start, NULL) != C_OK) return;
-    if (getLongFromObjectOrReply(c, c->argv[3], &stop, NULL) != C_OK) return;
-    if (c->argc == 5) {
-        if (strcasecmp(objectGetVal(c->argv[4]), "withscores")) {
-            addReplyErrorObject(c, shared.syntaxerr);
-            return;
-        }
-        withscores = 1;
-    }
-    if ((zobj = lookupKeyReadOrReply(c, key, shared.emptyarray)) == NULL || checkType(c, zobj, OBJ_ZVSET))
-        return;
-    zvrangeRankCore(c, zobj, start, stop, 1, withscores);
-}
-
-/* Shared BYSCORE wrapper core: ZVRANGEBYSCORE (reverse=0) /
- * ZVREVRANGEBYSCORE (reverse=1, args max min). */
-static void zvrangebyscoreGenericCommand(client *c, int reverse) {
-    robj *key = c->argv[1];
-    robj *zobj;
-    int withscores = 0;
-    int has_limit = 0;
-    long offset = 0, count = -1;
-
-    if (c->argc < 4) {
-        addReplyErrorObject(c, shared.syntaxerr);
-        return;
-    }
-    int idx = 4;
-    while (idx < c->argc) {
-        char *opt = objectGetVal(c->argv[idx]);
-        if (!strcasecmp(opt, "withscores")) {
-            withscores = 1;
-            idx++;
-        } else if (!strcasecmp(opt, "limit")) {
-            if (has_limit || idx + 2 >= c->argc) {
-                addReplyErrorObject(c, shared.syntaxerr);
-                return;
-            }
-            if (getLongFromObjectOrReply(c, c->argv[idx + 1], &offset, NULL) != C_OK) return;
-            if (getLongFromObjectOrReply(c, c->argv[idx + 2], &count, NULL) != C_OK) return;
-            if (offset < 0) {
-                addReplyError(c, "LIMIT offset must be non-negative");
-                return;
-            }
-            has_limit = 1;
-            idx += 3;
-        } else {
-            addReplyErrorObject(c, shared.syntaxerr);
-            return;
-        }
-    }
-    int minarg = reverse ? 3 : 2;
-    int maxarg = reverse ? 2 : 3;
-    sds minraw = objectGetVal(c->argv[minarg]);
-    sds maxraw = objectGetVal(c->argv[maxarg]);
-    if (!zvScoreBoundSyntaxOk(minraw, sdslen(minraw)) || !zvScoreBoundSyntaxOk(maxraw, sdslen(maxraw))) {
-        addReplyError(c, "invalid vector score range");
-        return;
-    }
-    if ((zobj = lookupKeyReadOrReply(c, key, shared.emptyarray)) == NULL || checkType(c, zobj, OBJ_ZVSET))
-        return;
-    if (zvrangeScoreCore(c, zobj, minraw, sdslen(minraw), maxraw, sdslen(maxraw), reverse, withscores, has_limit,
-                         offset, count) != C_OK) {
-        addReplyError(c, "invalid vector score range");
-        return;
-    }
-}
-
-void zvrangebyscoreCommand(client *c) {
-    zvrangebyscoreGenericCommand(c, 0);
-}
-
-void zvrevrangebyscoreCommand(client *c) {
-    zvrangebyscoreGenericCommand(c, 1);
-}
-
-/* Build [lower,upper) seek keys for uniform-vector BYLEX. Member bounds
- * use a trailing NUL byte instead of a carry successor (which is only
- * valid for fixed-length score prefixes): exclusive lower "a" seeks
- * "a\0" (first strictly greater member, so "ab" is kept), while
- * inclusive upper "a" ends exclusively at "a\0" (so "ab" is excluded).
- * Returns C_OK; *empty is set when the range is trivially empty. The
- * key must be non-empty and uniform (checked by the caller). */
-static int zvBuildLexInterval(zvset *zs, zvLexBound *minb, zvLexBound *maxb, sds *lower, sds *upper, int *empty) {
-    *lower = NULL;
-    *upper = NULL;
-    *empty = 0;
-    /* Reversed infinities ("+" as min or "-" as max) are empty, never
-     * a full range. */
-    if (minb->pos_inf || maxb->neg_inf) {
-        *empty = 1;
-        return C_OK;
-    }
-    if (!minb->unbounded && !maxb->unbounded) {
-        int cmp = zvLexMemberCompare(minb->member, sdslen(minb->member), maxb->member, sdslen(maxb->member));
-        if (cmp > 0 || (cmp == 0 && (minb->exclusive || maxb->exclusive))) {
-            *empty = 1;
-            return C_OK;
-        }
-    }
-    if (!minb->unbounded) {
-        sds key = zvLexSeekKey(zs, minb->member, sdslen(minb->member));
-        if (minb->exclusive) {
-            *lower = sdscatlen(key, "\0", 1);
-        } else {
-            *lower = key;
-        }
-    }
-    if (!maxb->unbounded) {
-        sds key = zvLexSeekKey(zs, maxb->member, sdslen(maxb->member));
-        if (maxb->exclusive) {
-            *upper = key;
-        } else {
-            *upper = sdscatlen(key, "\0", 1);
-        }
-    }
-    return C_OK;
-}
-
-/* Error message shared by every BYLEX entry point. */
-static void zvReplyBylexUniformError(client *c) {
-    addReplyError(c, "BYLEX requires all members to share the same vector score");
-}
-
-/* BYLEX core shared by ZVRANGE/ZVRANGEBYLEX/ZVREVRANGEBYLEX/ZVLEXCOUNT.
- * Withscores is always 0 for BYLEX (members only). Returns C_OK, or
+/* Resolve r against zs to the forward rank window [lo,hi). LIMIT and
+ * direction are applied later by zvIterateRange(). Returns C_OK, or
  * C_ERR with a reply already sent. */
-static int zvrangeLexCore(client *c, robj *zobj, const char *minraw, size_t minlen, const char *maxraw, size_t maxlen, int reverse, int withscores, int has_limit, long offset, long count) {
-    zvset *zs = objectGetVal(zobj);
-    if (!zvsetUniformVector(zs)) {
-        zvReplyBylexUniformError(c);
-        return C_ERR;
-    }
-    zvLexBound minb = {0}, maxb = {0};
-    if (zvParseLexBound(minraw, minlen, &minb) != C_OK || zvParseLexBound(maxraw, maxlen, &maxb) != C_OK) {
-        zvFreeLexBound(&minb);
-        zvFreeLexBound(&maxb);
-        addReplyError(c, "min or max not valid string range item");
-        return C_ERR;
-    }
-    sds lower = NULL, upper = NULL;
-    int empty = 0;
-    zvBuildLexInterval(zs, &minb, &maxb, &lower, &upper, &empty);
-    zvFreeLexBound(&minb);
-    zvFreeLexBound(&maxb);
-    if (empty) {
-        if (lower) sdsfree(lower);
-        if (upper) sdsfree(upper);
-        addReplyArrayLen(c, 0);
+static int zvResolveRange(client *c, zvset *zs, const zvRangeSpec *r, unsigned long *lo, unsigned long *hi) {
+    switch (r->type) {
+    case ZV_RANGE_RANK: zvRankWindow(zvsetLength(zs), r->start, r->stop, r->reverse, lo, hi); return C_OK;
+    case ZV_RANGE_SCORE:
+        if (zvsetScoreRangeToRanks(zs, r->min, sdslen(r->min), r->max, sdslen(r->max), lo, hi) != C_OK) {
+            zvReplyScoreRangeError(c);
+            return C_ERR;
+        }
+        return C_OK;
+    case ZV_RANGE_LEX:
+        if (!zvsetUniformVector(zs)) {
+            zvReplyBylexUniformError(c);
+            return C_ERR;
+        }
+        if (zvsetLexRangeToRanks(zs, r->min, sdslen(r->min), r->max, sdslen(r->max), lo, hi) != C_OK) {
+            zvReplyLexRangeError(c);
+            return C_ERR;
+        }
         return C_OK;
     }
-    unsigned long lo, hi;
-    zvScoreRanks(zs, lower, upper, &lo, &hi);
-    if (lower) sdsfree(lower);
-    if (upper) sdsfree(upper);
-    long lim_off = has_limit ? offset : 0;
-    long lim_cnt = has_limit ? count : -1;
-    zvrangeReply(c, zs, lo, hi, reverse, lim_off, lim_cnt, withscores);
-    return C_OK;
+    serverPanic("Unknown zvset range type");
 }
 
-/* Shared BYLEX wrapper core: ZVRANGEBYLEX (reverse=0) /
- * ZVREVRANGEBYLEX (reverse=1, args max min). */
-static void zvrangebylexGenericCommand(client *c, int reverse) {
-    robj *key = c->argv[1];
-    robj *zobj;
-    int has_limit = 0;
-    long offset = 0, count = -1;
-
-    if (c->argc < 4) {
-        addReplyErrorObject(c, shared.syntaxerr);
-        return;
-    }
-    int idx = 4;
-    while (idx < c->argc) {
-        char *opt = objectGetVal(c->argv[idx]);
-        if (!strcasecmp(opt, "limit")) {
-            if (has_limit || idx + 2 >= c->argc) {
-                addReplyErrorObject(c, shared.syntaxerr);
-                return;
-            }
-            if (getLongFromObjectOrReply(c, c->argv[idx + 1], &offset, NULL) != C_OK) return;
-            if (getLongFromObjectOrReply(c, c->argv[idx + 2], &count, NULL) != C_OK) return;
-            if (offset < 0) {
-                addReplyError(c, "LIMIT offset must be non-negative");
-                return;
-            }
-            has_limit = 1;
-            idx += 3;
-        } else {
-            addReplyErrorObject(c, shared.syntaxerr);
-            return;
-        }
-    }
-    int minarg = reverse ? 3 : 2;
-    int maxarg = reverse ? 2 : 3;
-    sds minraw = objectGetVal(c->argv[minarg]);
-    sds maxraw = objectGetVal(c->argv[maxarg]);
-    if (!zvLexBoundSyntaxOk(minraw, sdslen(minraw)) || !zvLexBoundSyntaxOk(maxraw, sdslen(maxraw))) {
-        addReplyError(c, "min or max not valid string range item");
-        return;
-    }
-    if ((zobj = lookupKeyReadOrReply(c, key, shared.emptyarray)) == NULL || checkType(c, zobj, OBJ_ZVSET))
-        return;
-    zvrangeLexCore(c, zobj, minraw, sdslen(minraw), maxraw, sdslen(maxraw), reverse, 0, has_limit, offset, count);
+/* Number of items zvIterateRange() emits for the same arguments. */
+static unsigned long zvRangeResultCount(unsigned long lo, unsigned long hi, long offset, long count) {
+    if (lo >= hi || (unsigned long)offset >= hi - lo) return 0;
+    unsigned long n = hi - lo - (unsigned long)offset;
+    if (count >= 0 && n > (unsigned long)count) n = (unsigned long)count;
+    return n;
 }
 
-void zvrangebylexCommand(client *c) {
-    zvrangebylexGenericCommand(c, 0);
+typedef struct zvRangeEmitCtx {
+    client *c;
+    int withscores;
+} zvRangeEmitCtx;
+
+static void zvRangeEmitClient(void *ctx, const_sds item) {
+    zvRangeEmitCtx *ectx = ctx;
+    addReplyZvElement(ectx->c, item, ectx->withscores);
 }
 
-void zvrevrangebylexCommand(client *c) {
-    zvrangebylexGenericCommand(c, 1);
-}
-
-void zvlexcountCommand(client *c) {
-    robj *key = c->argv[1];
-    robj *zobj;
-
-    if (c->argc != 4) {
-        addReplyErrorObject(c, shared.syntaxerr);
-        return;
-    }
-    sds minraw = objectGetVal(c->argv[2]);
-    sds maxraw = objectGetVal(c->argv[3]);
-    if (!zvLexBoundSyntaxOk(minraw, sdslen(minraw)) || !zvLexBoundSyntaxOk(maxraw, sdslen(maxraw))) {
-        addReplyError(c, "min or max not valid string range item");
-        return;
-    }
-    if ((zobj = lookupKeyReadOrReply(c, key, shared.czero)) == NULL || checkType(c, zobj, OBJ_ZVSET)) return;
-    zvset *zs = objectGetVal(zobj);
-    if (!zvsetUniformVector(zs)) {
-        zvReplyBylexUniformError(c);
-        return;
-    }
-    zvLexBound minb = {0}, maxb = {0};
-    if (zvParseLexBound(minraw, sdslen(minraw), &minb) != C_OK ||
-        zvParseLexBound(maxraw, sdslen(maxraw), &maxb) != C_OK) {
-        zvFreeLexBound(&minb);
-        zvFreeLexBound(&maxb);
-        addReplyError(c, "min or max not valid string range item");
-        return;
-    }
-    sds lower = NULL, upper = NULL;
-    int empty = 0;
-    zvBuildLexInterval(zs, &minb, &maxb, &lower, &upper, &empty);
-    zvFreeLexBound(&minb);
-    zvFreeLexBound(&maxb);
-    long long count;
-    if (empty) {
-        count = 0;
-    } else if (lower != NULL && upper != NULL) {
-        count = (long long)fbtreeCountRangeByValue(zs->tree, lower, upper, 0, 1);
-    } else {
-        unsigned long lo, hi;
-        zvScoreRanks(zs, lower, upper, &lo, &hi);
-        count = (long long)(hi - lo);
-    }
-    if (lower) sdsfree(lower);
-    if (upper) sdsfree(upper);
-    addReplyLongLong(c, count);
-}
-
-/* Collect packed-item copies for RANGESTORE (src may be replaced). */
+/* Collect packed-item copies for RANGESTORE (dst may be src). */
 typedef struct zvStoreCollect {
     sds *items;
     size_t len;
-    size_t cap;
 } zvStoreCollect;
 
 static void zvStoreCollectEmit(void *ctx, const_sds item) {
     zvStoreCollect *col = ctx;
-    if (col->len == col->cap) {
-        col->cap = col->cap ? col->cap * 2 : 16;
-        col->items = zrealloc(col->items, sizeof(sds) * col->cap);
-    }
     col->items[col->len++] = sdsdup(item);
 }
 
-void zvrangestoreCommand(client *c) {
-    robj *dstkey = c->argv[1];
-    robj *srckey = c->argv[2];
-    robj *srcobj;
-    zvRangeOpts o;
+/* Store the collected items at dstkey (replacing any value, like
+ * ZRANGESTORE), or delete dstkey when there are none. */
+static void zvStoreResult(client *c, robj *dstkey, uint8_t dims, zvStoreCollect *col) {
+    if (col->len > 0) {
+        robj *newobj = createZvsetObject(dims);
+        zvset *newzs = objectGetVal(newobj);
+        hashtableExpand(newzs->ht, col->len);
+        for (size_t i = 0; i < col->len; i++) {
+            sds inserted = fbtreeInsert(newzs->tree, col->items[i]);
+            serverAssert(hashtableAdd(newzs->ht, inserted));
+        }
+        setKey(c, c->db, dstkey, &newobj, 0);
+        notifyKeyspaceEvent(NOTIFY_ZSET, "zvrangestore", dstkey, c->db->id);
+        server.dirty++;
+    } else if (dbDelete(c->db, dstkey)) {
+        signalModifiedKey(c, c->db, dstkey);
+        notifyKeyspaceEvent(NOTIFY_GENERIC, "del", dstkey, c->db->id);
+        server.dirty++;
+    }
+    addReplyLongLong(c, (long long)col->len);
+}
 
-    if (c->argc < 5) {
+/* Shared implementation of every ZV*RANGE* read command and
+ * ZVRANGESTORE (dstkey != NULL). argv[keyidx] is the source key and
+ * the two range arguments follow it. */
+static void zvrangeGenericCommand(client *c, robj *dstkey, int keyidx, zvRangeType type, int reverse, int allowed) {
+    zvRangeSpec r = {.type = type, .reverse = reverse, .count = -1};
+    robj *zobj;
+
+    if (c->argc < keyidx + 3) {
         addReplyErrorObject(c, shared.syntaxerr);
         return;
     }
-    if (zvRangeParseOpts(c, 5, 0, &o) != C_OK) return;
+    if (zvParseRangeOptions(c, keyidx + 3, allowed, &r) != C_OK) return;
+    if (zvParseRangeArgs(c, keyidx + 1, &r) != C_OK) return;
 
-    long start = 0, stop = -1;
-    sds bound_min_raw = NULL, bound_max_raw = NULL;
-    size_t bound_min_len = 0, bound_max_len = 0;
-    if (o.mode == 0) {
-        if (getLongFromObjectOrReply(c, c->argv[3], &start, NULL) != C_OK) return;
-        if (getLongFromObjectOrReply(c, c->argv[4], &stop, NULL) != C_OK) return;
-    } else {
-        int minarg = o.reverse ? 4 : 3;
-        int maxarg = o.reverse ? 3 : 4;
-        bound_min_raw = objectGetVal(c->argv[minarg]);
-        bound_min_len = sdslen(bound_min_raw);
-        bound_max_raw = objectGetVal(c->argv[maxarg]);
-        bound_max_len = sdslen(bound_max_raw);
-        if (o.mode == 1) {
-            if (!zvScoreBoundSyntaxOk(bound_min_raw, bound_min_len) ||
-                !zvScoreBoundSyntaxOk(bound_max_raw, bound_max_len)) {
-                addReplyError(c, "invalid vector score range");
-                return;
-            }
-        } else {
-            if (!zvLexBoundSyntaxOk(bound_min_raw, bound_min_len) ||
-                !zvLexBoundSyntaxOk(bound_max_raw, bound_max_len)) {
-                addReplyError(c, "min or max not valid string range item");
-                return;
-            }
+    if (dstkey) {
+        zobj = lookupKeyWrite(c->db, c->argv[keyidx]);
+        if (checkType(c, zobj, OBJ_ZVSET)) return;
+        if (zobj == NULL) {
+            zvStoreCollect none = {NULL, 0};
+            zvStoreResult(c, dstkey, 0, &none);
+            return;
         }
-    }
-
-    /* Missing source: delete destination, return 0 (like ZRANGESTORE). */
-    if ((srcobj = lookupKeyWrite(c->db, srckey)) == NULL) {
-        if (dbDelete(c->db, dstkey)) {
-            signalModifiedKey(c, c->db, dstkey);
-            notifyKeyspaceEvent(NOTIFY_GENERIC, "del", dstkey, c->db->id);
-            server.dirty++;
-        }
-        addReplyLongLong(c, 0);
+    } else if ((zobj = lookupKeyReadOrReply(c, c->argv[keyidx], shared.emptyarray)) == NULL ||
+               checkType(c, zobj, OBJ_ZVSET)) {
         return;
     }
-    if (checkType(c, srcobj, OBJ_ZVSET)) return;
-    /* NOTE: no type check on dstkey: STORE replaces any existing type. */
 
-    zvset *src = objectGetVal(srcobj);
-    unsigned long lo = 0, hi = 0;
-    if (o.mode == 0) {
-        zvRankWindow(zvsetLength(src), start, stop, o.reverse, &lo, &hi);
-    } else if (o.mode == 1) {
-        zvScoreBound minb = {0}, maxb = {0};
-        if (zvParseScoreBound(bound_min_raw, bound_min_len, src->dimensions, &minb) != C_OK ||
-            zvParseScoreBound(bound_max_raw, bound_max_len, src->dimensions, &maxb) != C_OK) {
-            zvFreeScoreBound(&minb);
-            zvFreeScoreBound(&maxb);
-            addReplyError(c, "invalid vector score range");
-            return;
-        }
-        sds lower = NULL, upper = NULL;
-        int empty = 0;
-        zvBuildScoreInterval(&minb, &maxb, &lower, &upper, &empty);
-        zvFreeScoreBound(&minb);
-        zvFreeScoreBound(&maxb);
-        if (!empty) zvScoreRanks(src, lower, upper, &lo, &hi);
-        if (lower) sdsfree(lower);
-        if (upper) sdsfree(upper);
-    } else {
-        if (!zvsetUniformVector(src)) {
-            zvReplyBylexUniformError(c);
-            return;
-        }
-        zvLexBound minb = {0}, maxb = {0};
-        if (zvParseLexBound(bound_min_raw, bound_min_len, &minb) != C_OK ||
-            zvParseLexBound(bound_max_raw, bound_max_len, &maxb) != C_OK) {
-            zvFreeLexBound(&minb);
-            zvFreeLexBound(&maxb);
-            addReplyError(c, "min or max not valid string range item");
-            return;
-        }
-        sds lower = NULL, upper = NULL;
-        int empty = 0;
-        zvBuildLexInterval(src, &minb, &maxb, &lower, &upper, &empty);
-        zvFreeLexBound(&minb);
-        zvFreeLexBound(&maxb);
-        if (!empty) zvScoreRanks(src, lower, upper, &lo, &hi);
-        if (lower) sdsfree(lower);
-        if (upper) sdsfree(upper);
-    }
+    zvset *zs = objectGetVal(zobj);
+    unsigned long lo, hi;
+    if (zvResolveRange(c, zs, &r, &lo, &hi) != C_OK) return;
+    unsigned long n = zvRangeResultCount(lo, hi, r.offset, r.count);
 
-    /* Collect first: dst may be src. */
-    zvStoreCollect col = {NULL, 0, 0};
-    long lim_off = o.has_limit ? o.offset : 0;
-    long lim_cnt = o.has_limit ? o.count : -1;
-    zvIterateRange(src, lo, hi, o.reverse, lim_off, lim_cnt, zvStoreCollectEmit, &col);
-
-    uint8_t dims = src->dimensions;
-    /* Replace wholesale, even on dimension/type change (like ZRANGESTORE
-     * via setKey: any existing value is overwritten, TTL dropped). */
-    if (col.len > 0) {
-        robj *newobj = createZvsetObject(dims);
-        zvset *newzs = objectGetVal(newobj);
-        hashtableExpand(newzs->ht, col.len);
-        for (size_t i = 0; i < col.len; i++) {
-            sds inserted = fbtreeInsert(newzs->tree, col.items[i]);
-            serverAssert(hashtableAdd(newzs->ht, inserted));
-        }
+    if (dstkey) {
+        /* Collect first: dst may be src. */
+        zvStoreCollect col = {n ? zmalloc(sizeof(sds) * n) : NULL, 0};
+        zvIterateRange(zs, lo, hi, r.reverse, r.offset, r.count, zvStoreCollectEmit, &col);
+        serverAssert(col.len == n);
+        zvStoreResult(c, dstkey, zs->dimensions, &col);
         zfree(col.items);
-        setKey(c, c->db, dstkey, &newobj, 0);
-        notifyKeyspaceEvent(NOTIFY_GENERIC, "zvrangestore", dstkey, c->db->id);
-        server.dirty++;
-    } else {
-        zfree(col.items);
-        if (dbDelete(c->db, dstkey)) {
-            signalModifiedKey(c, c->db, dstkey);
-            notifyKeyspaceEvent(NOTIFY_GENERIC, "del", dstkey, c->db->id);
-            server.dirty++;
-        }
+        return;
     }
-    addReplyLongLong(c, (long long)col.len);
+    addReplyArrayLen(c, (r.withscores && c->resp <= 2) ? n * 2 : n);
+    zvRangeEmitCtx ctx = {c, r.withscores};
+    zvIterateRange(zs, lo, hi, r.reverse, r.offset, r.count, zvRangeEmitClient, &ctx);
+}
+
+/* ZVRANGE key start stop [BYSCORE|BYLEX] [REV] [LIMIT offset count] [WITHSCORES] */
+void zvrangeCommand(client *c) {
+    zvrangeGenericCommand(c, NULL, 1, ZV_RANGE_RANK, 0, ZV_OPT_BY | ZV_OPT_REV | ZV_OPT_WITHSCORES | ZV_OPT_LIMIT);
+}
+
+/* ZVRANGESTORE dst src start stop [BYSCORE|BYLEX] [REV] [LIMIT offset count] */
+void zvrangestoreCommand(client *c) {
+    zvrangeGenericCommand(c, c->argv[1], 2, ZV_RANGE_RANK, 0, ZV_OPT_BY | ZV_OPT_REV | ZV_OPT_LIMIT);
+}
+
+void zvrevrangeCommand(client *c) {
+    zvrangeGenericCommand(c, NULL, 1, ZV_RANGE_RANK, 1, ZV_OPT_WITHSCORES);
+}
+
+void zvrangebyscoreCommand(client *c) {
+    zvrangeGenericCommand(c, NULL, 1, ZV_RANGE_SCORE, 0, ZV_OPT_WITHSCORES | ZV_OPT_LIMIT);
+}
+
+void zvrevrangebyscoreCommand(client *c) {
+    zvrangeGenericCommand(c, NULL, 1, ZV_RANGE_SCORE, 1, ZV_OPT_WITHSCORES | ZV_OPT_LIMIT);
+}
+
+void zvrangebylexCommand(client *c) {
+    zvrangeGenericCommand(c, NULL, 1, ZV_RANGE_LEX, 0, ZV_OPT_LIMIT);
+}
+
+void zvrevrangebylexCommand(client *c) {
+    zvrangeGenericCommand(c, NULL, 1, ZV_RANGE_LEX, 1, ZV_OPT_LIMIT);
+}
+
+/* ZVCOUNT / ZVLEXCOUNT: size of the resolved rank window. */
+static void zvcountGenericCommand(client *c, zvRangeType type) {
+    zvRangeSpec r = {.type = type, .count = -1};
+    robj *zobj;
+
+    if (zvParseRangeArgs(c, 2, &r) != C_OK) return;
+    if ((zobj = lookupKeyReadOrReply(c, c->argv[1], shared.czero)) == NULL || checkType(c, zobj, OBJ_ZVSET)) return;
+    unsigned long lo, hi;
+    if (zvResolveRange(c, objectGetVal(zobj), &r, &lo, &hi) != C_OK) return;
+    addReplyLongLong(c, (long long)(hi - lo));
+}
+
+void zvcountCommand(client *c) {
+    zvcountGenericCommand(c, ZV_RANGE_SCORE);
+}
+
+void zvlexcountCommand(client *c) {
+    zvcountGenericCommand(c, ZV_RANGE_LEX);
+}
+
+/* ZVRANKBYSCORE / ZVREVRANKBYSCORE key score: the rank score would take
+ * if inserted (TairZset EXZRANKBYSCORE semantics). A missing key ranks
+ * every score at 0. */
+static void zvrankbyscoreGenericCommand(client *c, int reverse) {
+    sds raw = objectGetVal(c->argv[2]);
+    zvScore *score = zvScoreParse(raw, sdslen(raw));
+    if (score == NULL) {
+        addReplyError(c, "invalid vector score value, must be like '1#2#3.5'");
+        return;
+    }
+    robj *zobj = lookupKeyRead(c->db, c->argv[1]);
+    if (checkType(c, zobj, OBJ_ZVSET)) {
+        zvScoreFree(score);
+        return;
+    }
+    if (zobj == NULL) {
+        addReplyLongLong(c, 0);
+    } else if (score->len != ((zvset *)objectGetVal(zobj))->dimensions) {
+        addReplyError(c, "vector dimension mismatch for existing key");
+    } else {
+        addReplyLongLong(c, (long long)zvsetRankByScore(objectGetVal(zobj), score, reverse));
+    }
+    zvScoreFree(score);
+}
+
+void zvrankbyscoreCommand(client *c) {
+    zvrankbyscoreGenericCommand(c, 0);
+}
+
+void zvrevrankbyscoreCommand(client *c) {
+    zvrankbyscoreGenericCommand(c, 1);
 }
 
 /* Callback for fbtree range deletion: drop the hashtable reference
@@ -1057,150 +683,48 @@ static void zvRangeDeleteCallback(sds item, void *ctx) {
     serverAssert(hashtableDelete(zs->ht, item));
 }
 
-/* Shared tail for REMRANGE*: pause shrink held, key deletion, notify. */
-static void zvremrangeFinish(client *c, robj *key, zvset *zs, unsigned long deleted, char *event) {
-    int keyremoved = 0;
-    if (hashtableSize(zs->ht) == 0) {
+/* ZVREMRANGEBYRANK / ZVREMRANGEBYSCORE / ZVREMRANGEBYLEX. */
+static void zvremrangeGenericCommand(client *c, zvRangeType type) {
+    static char *events[] = {"zvremrangebyrank", "zvremrangebyscore", "zvremrangebylex"};
+    zvRangeSpec r = {.type = type, .count = -1};
+    robj *key = c->argv[1];
+    robj *zobj;
+
+    if (zvParseRangeArgs(c, 2, &r) != C_OK) return;
+    if ((zobj = lookupKeyWriteOrReply(c, key, shared.czero)) == NULL || checkType(c, zobj, OBJ_ZVSET)) return;
+    zvset *zs = objectGetVal(zobj);
+    unsigned long lo, hi;
+    if (zvResolveRange(c, zs, &r, &lo, &hi) != C_OK) return;
+    if (lo >= hi) {
+        addReply(c, shared.czero);
+        return;
+    }
+
+    hashtablePauseAutoShrink(zs->ht);
+    unsigned long deleted = fbtreeDeleteRangeByRank(zs->tree, lo, hi - 1, zvRangeDeleteCallback, zs);
+    int keyremoved = zvsetLength(zs) == 0;
+    if (keyremoved) {
         dbDelete(c->db, key);
-        keyremoved = 1;
     } else {
         hashtableResumeAutoShrink(zs->ht);
     }
-    if (deleted) {
-        signalModifiedKey(c, c->db, key);
-        notifyKeyspaceEvent(NOTIFY_GENERIC, event, key, c->db->id);
-        if (keyremoved) notifyKeyspaceEvent(NOTIFY_GENERIC, "del", key, c->db->id);
-        server.dirty += deleted;
-    }
+    signalModifiedKey(c, c->db, key);
+    notifyKeyspaceEvent(NOTIFY_ZSET, events[type], key, c->db->id);
+    if (keyremoved) notifyKeyspaceEvent(NOTIFY_GENERIC, "del", key, c->db->id);
+    server.dirty += deleted;
     addReplyLongLong(c, (long long)deleted);
 }
 
 void zvremrangebyrankCommand(client *c) {
-    robj *key = c->argv[1];
-    robj *zobj;
-    long start, stop;
-    unsigned long deleted = 0;
-
-    if (c->argc != 4) {
-        addReplyErrorObject(c, shared.syntaxerr);
-        return;
-    }
-    if (getLongFromObjectOrReply(c, c->argv[2], &start, NULL) != C_OK) return;
-    if (getLongFromObjectOrReply(c, c->argv[3], &stop, NULL) != C_OK) return;
-    if ((zobj = lookupKeyWriteOrReply(c, key, shared.czero)) == NULL || checkType(c, zobj, OBJ_ZVSET)) return;
-
-    zvset *zs = objectGetVal(zobj);
-    long len = (long)zvsetLength(zs);
-    if (start < 0) start = len + start;
-    if (stop < 0) stop = len + stop;
-    if (start < 0) start = 0;
-    if (!(stop < 0 || start > stop || start >= len)) {
-        if (stop >= len) stop = len - 1;
-        hashtablePauseAutoShrink(zs->ht);
-        deleted = fbtreeDeleteRangeByRank(zs->tree, (unsigned long)start, (unsigned long)stop,
-                                          zvRangeDeleteCallback, zs);
-        zvremrangeFinish(c, key, zs, deleted, "zvremrangebyrank");
-        return;
-    }
-    addReply(c, shared.czero);
+    zvremrangeGenericCommand(c, ZV_RANGE_RANK);
 }
 
 void zvremrangebyscoreCommand(client *c) {
-    robj *key = c->argv[1];
-    robj *zobj;
-    unsigned long deleted = 0;
-
-    if (c->argc != 4) {
-        addReplyErrorObject(c, shared.syntaxerr);
-        return;
-    }
-    sds minraw = objectGetVal(c->argv[2]);
-    sds maxraw = objectGetVal(c->argv[3]);
-    if (!zvScoreBoundSyntaxOk(minraw, sdslen(minraw)) || !zvScoreBoundSyntaxOk(maxraw, sdslen(maxraw))) {
-        addReplyError(c, "invalid vector score range");
-        return;
-    }
-    if ((zobj = lookupKeyWriteOrReply(c, key, shared.czero)) == NULL || checkType(c, zobj, OBJ_ZVSET)) return;
-    zvset *zs = objectGetVal(zobj);
-    zvScoreBound minb = {0}, maxb = {0};
-    if (zvParseScoreBound(minraw, sdslen(minraw), zs->dimensions, &minb) != C_OK ||
-        zvParseScoreBound(maxraw, sdslen(maxraw), zs->dimensions, &maxb) != C_OK) {
-        zvFreeScoreBound(&minb);
-        zvFreeScoreBound(&maxb);
-        addReplyError(c, "invalid vector score range");
-        return;
-    }
-    sds lower = NULL, upper = NULL;
-    int empty = 0;
-    zvBuildScoreInterval(&minb, &maxb, &lower, &upper, &empty);
-    zvFreeScoreBound(&minb);
-    zvFreeScoreBound(&maxb);
-    hashtablePauseAutoShrink(zs->ht);
-    if (!empty) {
-        if (lower != NULL && upper != NULL) {
-            deleted = fbtreeDeleteRangeByValue(zs->tree, lower, upper, 0, 1, zvRangeDeleteCallback, zs);
-        } else {
-            unsigned long lo, hi;
-            zvScoreRanks(zs, lower, upper, &lo, &hi);
-            if (lo < hi) {
-                deleted = fbtreeDeleteRangeByRank(zs->tree, lo, hi - 1, zvRangeDeleteCallback, zs);
-            }
-        }
-    }
-    if (lower) sdsfree(lower);
-    if (upper) sdsfree(upper);
-    zvremrangeFinish(c, key, zs, deleted, "zvremrangebyscore");
+    zvremrangeGenericCommand(c, ZV_RANGE_SCORE);
 }
 
 void zvremrangebylexCommand(client *c) {
-    robj *key = c->argv[1];
-    robj *zobj;
-    unsigned long deleted = 0;
-
-    if (c->argc != 4) {
-        addReplyErrorObject(c, shared.syntaxerr);
-        return;
-    }
-    sds minraw = objectGetVal(c->argv[2]);
-    sds maxraw = objectGetVal(c->argv[3]);
-    if (!zvLexBoundSyntaxOk(minraw, sdslen(minraw)) || !zvLexBoundSyntaxOk(maxraw, sdslen(maxraw))) {
-        addReplyError(c, "min or max not valid string range item");
-        return;
-    }
-    if ((zobj = lookupKeyWriteOrReply(c, key, shared.czero)) == NULL || checkType(c, zobj, OBJ_ZVSET)) return;
-    zvset *zs = objectGetVal(zobj);
-    if (!zvsetUniformVector(zs)) {
-        zvReplyBylexUniformError(c);
-        return;
-    }
-    zvLexBound minb = {0}, maxb = {0};
-    if (zvParseLexBound(minraw, sdslen(minraw), &minb) != C_OK ||
-        zvParseLexBound(maxraw, sdslen(maxraw), &maxb) != C_OK) {
-        zvFreeLexBound(&minb);
-        zvFreeLexBound(&maxb);
-        addReplyError(c, "min or max not valid string range item");
-        return;
-    }
-    sds lower = NULL, upper = NULL;
-    int empty = 0;
-    zvBuildLexInterval(zs, &minb, &maxb, &lower, &upper, &empty);
-    zvFreeLexBound(&minb);
-    zvFreeLexBound(&maxb);
-    hashtablePauseAutoShrink(zs->ht);
-    if (!empty) {
-        if (lower != NULL && upper != NULL) {
-            deleted = fbtreeDeleteRangeByValue(zs->tree, lower, upper, 0, 1, zvRangeDeleteCallback, zs);
-        } else {
-            unsigned long lo, hi;
-            zvScoreRanks(zs, lower, upper, &lo, &hi);
-            if (lo < hi) {
-                deleted = fbtreeDeleteRangeByRank(zs->tree, lo, hi - 1, zvRangeDeleteCallback, zs);
-            }
-        }
-    }
-    if (lower) sdsfree(lower);
-    if (upper) sdsfree(upper);
-    zvremrangeFinish(c, key, zs, deleted, "zvremrangebylex");
+    zvremrangeGenericCommand(c, ZV_RANGE_LEX);
 }
 
 #define ZVPOP_MIN 0
@@ -1347,22 +871,21 @@ void genericZvpopCommand(client *c,
     do {
         sds item = (where == ZVPOP_MAX) ? fbtreePopMax(zs->tree) : fbtreePopMin(zs->tree);
         serverAssertWithInfo(c, zobj, item != NULL);
-        size_t member_len;
-        const char *member = zvItemMember(item, &member_len);
-        sds score = zvItemFormatScore(item);
         /* Drop the hashtable reference while the item is alive. */
         serverAssert(hashtableDelete(zs->ht, item));
         server.dirty++;
 
         if (result_count == 0) {
             char *events[2] = {"zvpopmin", "zvpopmax"};
-            notifyKeyspaceEvent(NOTIFY_GENERIC, events[where], key, c->db->id);
+            notifyKeyspaceEvent(NOTIFY_ZSET, events[where], key, c->db->id);
             zvPopInitialReply(c, emitkey, use_nested_array, rangelen, key);
         }
 
+        size_t member_len;
+        const char *member = zvItemMember(item, &member_len);
         if (use_nested_array) addReplyArrayLen(c, 2);
         addReplyBulkCBuffer(c, member, member_len);
-        addReplyBulkSds(c, score);
+        addReplyZvScore(c, item);
         sdsfree(item);
         ++result_count;
     } while (--rangelen);
@@ -1510,7 +1033,7 @@ void blockingGenericZvpopCommand(client *c, robj **keys, int numkeys, int where,
         return;
     }
 
-    blockForKeys(c, BLOCKED_ZSET, keys, numkeys, timeout, 0);
+    blockForKeys(c, BLOCKED_ZVSET, keys, numkeys, timeout, 0);
 }
 
 void bzvpopminCommand(client *c) {
@@ -1621,15 +1144,7 @@ void zvrandmemberCommand(client *c) {
                 items[i] = item;
             }
             serverAssert(item != NULL);
-            size_t member_len;
-            const char *member = zvItemMember(item, &member_len);
-            /* RESP3 nests [member, score] pairs like ZRANDMEMBER. */
-            if (withscores && c->resp > 2) addReplyArrayLen(c, 2);
-            addReplyBulkCBuffer(c, member, member_len);
-            if (withscores) {
-                sds formatted = zvItemFormatScore(item);
-                addReplyBulkSds(c, formatted);
-            }
+            addReplyZvElement(c, item, withscores);
             if (c->flag.close_asap) break;
         }
         zfree(items);
@@ -1650,15 +1165,7 @@ void zvrandmemberCommand(client *c) {
         if (j != i) zvRankMapSet(map, j, vi);
         const_sds item = fbtreeGetAtRank(zs->tree, vj);
         serverAssert(item != NULL);
-        size_t member_len;
-        const char *member = zvItemMember(item, &member_len);
-        /* RESP3 nests [member, score] pairs like ZRANDMEMBER. */
-        if (withscores && c->resp > 2) addReplyArrayLen(c, 2);
-        addReplyBulkCBuffer(c, member, member_len);
-        if (withscores) {
-            sds formatted = zvItemFormatScore(item);
-            addReplyBulkSds(c, formatted);
-        }
+        addReplyZvElement(c, item, withscores);
         if (c->flag.close_asap) break;
     }
     zvRankMapFree(map);
@@ -1863,15 +1370,7 @@ void zvqueryCommand(client *c) {
             skipped++;
             continue;
         }
-        size_t member_len;
-        const char *member = zvItemMember(item, &member_len);
-        /* RESP3 nests [member, score] pairs like ZRANGE; RESP2 stays flat. */
-        if (withscores && c->resp > 2) addReplyArrayLen(c, 2);
-        addReplyBulkCBuffer(c, member, member_len);
-        if (withscores) {
-            sds formatted = zvItemFormatScore(item);
-            addReplyBulkSds(c, formatted);
-        }
+        addReplyZvElement(c, item, withscores);
         emitted++;
         if (count >= 0 && emitted >= count) break;
     }
@@ -2171,7 +1670,7 @@ static void zvsetopGenericCommand(client *c, robj *dstkey, int numkeysIndex, int
         unsigned long resultlen = zvsetLength(tmp);
         if (resultlen) {
             setKey(c, c->db, dstkey, &tmpobj, 0);
-            notifyKeyspaceEvent(NOTIFY_GENERIC, (char *)opnames[op], dstkey, c->db->id);
+            notifyKeyspaceEvent(NOTIFY_ZSET, (char *)opnames[op], dstkey, c->db->id);
             addReplyLongLong(c, (long long)resultlen);
             server.dirty++;
         } else {
@@ -2193,14 +1692,7 @@ static void zvsetopGenericCommand(client *c, robj *dstkey, int numkeysIndex, int
         fbtreeInitIterator(&it, tmp->tree);
         const_sds item;
         while ((item = fbtreeNext(&it)) != NULL) {
-            if (withscores && c->resp > 2) addReplyArrayLen(c, 2);
-            size_t mlen;
-            const char *member = zvItemMember(item, &mlen);
-            addReplyBulkCBuffer(c, member, mlen);
-            if (withscores) {
-                sds formatted = zvItemFormatScore(item);
-                addReplyBulkSds(c, formatted);
-            }
+            addReplyZvElement(c, item, withscores);
         }
         decrRefCount(tmpobj);
     }
@@ -2235,50 +1727,6 @@ void zvintercardCommand(client *c) {
     zvsetopGenericCommand(c, NULL, 1, ZV_OP_INTER, 1);
 }
 
-void zvcountCommand(client *c) {
-    robj *key = c->argv[1];
-    robj *zobj;
-
-    if (c->argc != 4) {
-        addReplyErrorObject(c, shared.syntaxerr);
-        return;
-    }
-    sds minraw = objectGetVal(c->argv[2]);
-    sds maxraw = objectGetVal(c->argv[3]);
-    if (!zvScoreBoundSyntaxOk(minraw, sdslen(minraw)) || !zvScoreBoundSyntaxOk(maxraw, sdslen(maxraw))) {
-        addReplyError(c, "invalid vector score range");
-        return;
-    }
-    if ((zobj = lookupKeyReadOrReply(c, key, shared.czero)) == NULL || checkType(c, zobj, OBJ_ZVSET)) return;
-    zvset *zs = objectGetVal(zobj);
-    zvScoreBound minb = {0}, maxb = {0};
-    if (zvParseScoreBound(minraw, sdslen(minraw), zs->dimensions, &minb) != C_OK ||
-        zvParseScoreBound(maxraw, sdslen(maxraw), zs->dimensions, &maxb) != C_OK) {
-        zvFreeScoreBound(&minb);
-        zvFreeScoreBound(&maxb);
-        addReplyError(c, "invalid vector score range");
-        return;
-    }
-    sds lower = NULL, upper = NULL;
-    int empty = 0;
-    zvBuildScoreInterval(&minb, &maxb, &lower, &upper, &empty);
-    zvFreeScoreBound(&minb);
-    zvFreeScoreBound(&maxb);
-    long long count;
-    if (empty) {
-        count = 0;
-    } else if (lower != NULL && upper != NULL) {
-        count = (long long)fbtreeCountRangeByValue(zs->tree, lower, upper, 0, 1);
-    } else {
-        unsigned long lo, hi;
-        zvScoreRanks(zs, lower, upper, &lo, &hi);
-        count = (long long)(hi - lo);
-    }
-    if (lower) sdsfree(lower);
-    if (upper) sdsfree(upper);
-    addReplyLongLong(c, count);
-}
-
 void zvcardCommand(client *c) {
     robj *key = c->argv[1];
     robj *zobj;
@@ -2286,7 +1734,7 @@ void zvcardCommand(client *c) {
     if ((zobj = lookupKeyReadOrReply(c, key, shared.czero)) == NULL || checkType(c, zobj, OBJ_ZVSET))
         return;
     zvset *zs = objectGetVal(zobj);
-    /* Debug builds: ht and tree must agree. */
+    /* The hashtable and the tree must always agree. */
     serverAssert(hashtableSize(zs->ht) == fbtreeLength(zs->tree));
     addReplyLongLong(c, (long long)hashtableSize(zs->ht));
 }
@@ -2312,11 +1760,11 @@ int rewriteZvsetObject(rio *r, robj *key, robj *o) {
                 return 0;
             }
         }
-        sds formatted = zvItemFormatScore(item);
+        char buf[ZVSET_SCORE_BUFLEN];
+        size_t buflen = zvItemFormatScoreBuf(item, buf);
         size_t member_len;
         const char *member = zvItemMember(item, &member_len);
-        int ok = rioWriteBulkString(r, formatted, sdslen(formatted)) && rioWriteBulkString(r, member, member_len);
-        sdsfree(formatted);
+        int ok = rioWriteBulkString(r, buf, buflen) && rioWriteBulkString(r, member, member_len);
         if (!ok) {
             hashtableCleanupIterator(&iter);
             return 0;

@@ -998,14 +998,89 @@ start_server {tags {"zvset-blocking"}} {    test "BZVPOPMIN wake-up on ZVADD" {
         $rd close
     }
 
-    test "BZVPOPMIN woken by ZSET creation gets WRONGTYPE safely" {
+    test "BZVPOPMIN keeps blocking when a ZSET is created at the key" {
         r del bk
         set rd [valkey_deferring_client]
-        $rd bzvpopmin bk 5
+        $rd bzvpopmin bk 0
         wait_for_blocked_clients_count 1
         r zadd bk 1 m
-        assert_error "*WRONGTYPE*" {$rd read}
+        # A ZSET must not wake a ZVSET waiter (and vice versa).
+        wait_for_blocked_clients_count 1
+        r del bk
+        r zvadd bk 1#2 m
+        assert_equal {bk m 1#2} [$rd read]
         $rd close
+    }
+
+    test "BZPOPMIN keeps blocking when a ZVSET is created at the key" {
+        r del bk
+        set rd [valkey_deferring_client]
+        $rd bzpopmin bk 0
+        wait_for_blocked_clients_count 1
+        r zvadd bk 1#2 m
+        wait_for_blocked_clients_count 1
+        r del bk
+        r zadd bk 3 m
+        assert_equal {bk m 3} [$rd read]
+        $rd close
+    }
+}
+
+start_server {tags {"zvset-compat"}} {
+    test "ZVRANKBYSCORE and ZVREVRANKBYSCORE" {
+        r del rk
+        r zvadd rk 1#0#3 a 1#0#2 b 3#2#4 c 2#0#2 d
+        # Order: b(1#0#2) a(1#0#3) d(2#0#2) c(3#2#4)
+        assert_equal 2 [r zvrankbyscore rk 2#0#2]
+        assert_equal 1 [r zvrevrankbyscore rk 2#0#2]
+        assert_equal 0 [r zvrankbyscore rk 0#0#0]
+        assert_equal 4 [r zvrankbyscore rk 9#9#9]
+        assert_equal 0 [r zvrevrankbyscore rk 9#9#9]
+        assert_equal 4 [r zvrevrankbyscore rk 0#0#0]
+        assert_equal 0 [r zvrankbyscore rk-missing 1#2]
+        assert_error "*dimension*" {r zvrankbyscore rk 1#2}
+        assert_error "*invalid vector*" {r zvrankbyscore rk foo}
+        r set rk-str x
+        assert_error "*WRONGTYPE*" {r zvrankbyscore rk-str 1}
+    }
+
+    test "Scalar -inf/+inf bounds cover every dimension" {
+        r del ik
+        r zvadd ik 1#2 a 3#4 b -inf#-inf lo +inf#+inf hi
+        assert_equal {lo a b hi} [r zvrangebyscore ik -inf +inf]
+        assert_equal {hi b a lo} [r zvrevrangebyscore ik +inf -inf]
+        assert_equal 4 [r zvcount ik -inf +inf]
+        assert_equal {a b hi} [r zvrangebyscore ik (-inf +inf]
+        assert_equal {hi} [r zvrangebyscore ik +inf +inf]
+        assert_equal 2 [r zvremrangebyscore ik (-inf (+inf]
+        assert_equal {lo hi} [r zvrange ik 0 -1]
+    }
+
+    test "ZVINCRBY treats every argument as an increment, not an option" {
+        r del ik2
+        assert_error "*invalid vector*" {r zvincrby ik2 nx m}
+        assert_equal 0 [r exists ik2]
+    }
+
+    test "ZVSET keyspace notifications use the sorted set class and emit del" {
+        r config set notify-keyspace-events Kz
+        set rd [valkey_deferring_client]
+        $rd psubscribe __keyspace@*__:nk
+        $rd read
+        r zvadd nk 1#1 a 2#2 b
+        r zvrem nk a b
+        assert_equal {pmessage __keyspace@*__:nk __keyspace@9__:nk zvadd} [$rd read]
+        assert_equal {pmessage __keyspace@*__:nk __keyspace@9__:nk zvrem} [$rd read]
+        $rd close
+        r config set notify-keyspace-events Kg
+        set rd [valkey_deferring_client]
+        $rd psubscribe __keyspace@*__:nk
+        $rd read
+        r zvadd nk 1#1 a
+        r zvrem nk a
+        assert_equal {pmessage __keyspace@*__:nk __keyspace@9__:nk del} [$rd read]
+        $rd close
+        r config set notify-keyspace-events ""
     }
 }
 

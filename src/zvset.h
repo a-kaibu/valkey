@@ -31,6 +31,9 @@ typedef struct zvset {
 } zvset;
 
 #define ZVSET_MAX_DIMENSIONS 255
+/* Formatted "v0#v1#..." upper bound: fpconv_dtoa writes at most 24 bytes
+ * per component, plus one '#' separator. */
+#define ZVSET_SCORE_BUFLEN (ZVSET_MAX_DIMENSIONS * 25)
 
 /* ZVADD input flags. */
 #define ZVADD_IN_NONE 0
@@ -66,6 +69,8 @@ int zvScoreCompare(const zvScore *a, const zvScore *b);
 int zvScoreIncrement(zvScore *result, const zvScore *base, const zvScore *delta);
 /* Format a parsed vector as "v0#v1#...". Caller must sdsfree(). */
 sds zvScoreFormat(const zvScore *score);
+/* Same, into buf of ZVSET_SCORE_BUFLEN bytes. Returns the length. */
+size_t zvScoreFormatBuf(const zvScore *score, char *buf);
 /* Decode a packed item's full vector into out (len must match). */
 void zvItemToScore(const_sds item, zvScore *out);
 
@@ -130,6 +135,14 @@ int zvsetUniformVector(zvset *zs);
  * be non-empty and uniform. Caller frees the result. */
 sds zvLexSeekKey(zvset *zs, const char *member, size_t member_len);
 
+/* Resolve protocol range bounds to half-open ranks [lo,hi). Both return
+ * C_ERR on a malformed bound (or, for scores, a dimension mismatch).
+ * BYLEX additionally requires zvsetUniformVector(). */
+int zvsetScoreRangeToRanks(zvset *zs, const char *min, size_t minlen, const char *max, size_t maxlen, unsigned long *lo, unsigned long *hi);
+int zvsetLexRangeToRanks(zvset *zs, const char *min, size_t minlen, const char *max, size_t maxlen, unsigned long *lo, unsigned long *hi);
+/* Rank score would take on insertion (ZVRANKBYSCORE/ZVREVRANKBYSCORE). */
+unsigned long zvsetRankByScore(zvset *zs, const zvScore *score, int reverse);
+
 /* Range iteration over [lo,hi): reverse selects direction, offset/count
  * apply LIMIT (count < 0 means all). emit is called per item. */
 typedef void (*zvRangeEmit)(void *ctx, const_sds item);
@@ -145,8 +158,12 @@ uint8_t zvItemDimensions(const_sds item);
 const char *zvItemMember(const_sds item, size_t *member_len);
 double zvItemScoreAt(const_sds item, uint8_t dimension);
 int zvItemScoreEquals(const_sds item, const zvScore *score);
+/* Sign of item's vector minus score (same dimensions). */
+int zvItemScoreCompare(const_sds item, const zvScore *score);
 /* Format vector score as "v0#v1#..." (Tair style). Caller must sdsfree(). */
 sds zvItemFormatScore(const_sds item);
+/* Same, into buf of ZVSET_SCORE_BUFLEN bytes. Returns the length. */
+size_t zvItemFormatScoreBuf(const_sds item, char *buf);
 
 /* Core operations. member is a plain SDS (not owned). */
 int zvsetAdd(zvset *zs, const zvScore *score, sds member, int in_flags, int *out_flags);
