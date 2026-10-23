@@ -196,8 +196,6 @@ static inline int zvsetIsCompact(const zvset *zs) {
     return zs->tree == NULL;
 }
 const char *zvsetEncodingName(const zvset *zs);
-/* Convert a btree key that fits the compact limits back to compact. */
-void zvsetCompactIfFits(zvset *zs);
 /* Reserve room for size members; returns 0 on allocation failure. */
 int zvsetTryExpand(zvset *zs, unsigned long size);
 /* Insert an item (ownership transfers) whose member is absent. */
@@ -207,6 +205,9 @@ int zvsetTryInsert(zvset *zs, sds item);
 /* Build a zvset from a hashtable of owned items (zvsetHashtableType).
  * The hashtable is consumed. */
 zvset *zvsetFromHashtable(uint8_t dimensions, hashtable *ht);
+/* Build a zvset from count owned items with distinct members, in any
+ * order (items is sorted in place; the array itself stays the caller's). */
+zvset *zvsetFromItems(uint8_t dimensions, sds *items, unsigned long count);
 /* The stored item whose member equals item's member, or NULL. */
 const_sds zvsetFindItemMember(zvset *zs, const_sds item);
 long zvsetRankOf(zvset *zs, const_sds item);

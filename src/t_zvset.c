@@ -401,6 +401,19 @@ typedef struct zvRangeSpec {
     long count;  /* LIMIT count, -1 (all) without LIMIT. */
 } zvRangeSpec;
 
+/* Reset r for a command. Not an initializer: that would zero both score
+ * bounds (4 KB) on every call. The bounds are filled by zvParseRangeArgs(). */
+static void zvRangeSpecInit(zvRangeSpec *r, zvRangeType type, int reverse) {
+    r->type = type;
+    r->reverse = reverse;
+    r->withscores = 0;
+    r->start = r->stop = 0;
+    r->min = r->max = NULL;
+    r->minb.len = r->maxb.len = 0;
+    r->offset = 0;
+    r->count = -1;
+}
+
 /* Option groups accepted by zvParseRangeOptions(). */
 #define ZV_OPT_BY (1 << 0)
 #define ZV_OPT_REV (1 << 1)
@@ -589,7 +602,8 @@ static void zvStoreResult(client *c, robj *dstkey, uint8_t dims, zvStoreCollect 
  * ZVRANGESTORE (dstkey != NULL). argv[keyidx] is the source key and
  * the two range arguments follow it. */
 static void zvrangeGenericCommand(client *c, robj *dstkey, int keyidx, zvRangeType type, int reverse, int allowed) {
-    zvRangeSpec r = {.type = type, .reverse = reverse, .count = -1};
+    zvRangeSpec r;
+    zvRangeSpecInit(&r, type, reverse);
     robj *zobj;
 
     if (c->argc < keyidx + 3) {
@@ -663,7 +677,8 @@ void zvrevrangebylexCommand(client *c) {
 
 /* ZVCOUNT / ZVLEXCOUNT: number of items in the range. */
 static void zvcountGenericCommand(client *c, zvRangeType type) {
-    zvRangeSpec r = {.type = type, .count = -1};
+    zvRangeSpec r;
+    zvRangeSpecInit(&r, type, 0);
     robj *zobj;
 
     if (zvParseRangeArgs(c, 2, &r) != C_OK) return;
@@ -727,7 +742,8 @@ void zvrevrankbyscoreCommand(client *c) {
 /* ZVREMRANGEBYRANK / ZVREMRANGEBYSCORE / ZVREMRANGEBYLEX. */
 static void zvremrangeGenericCommand(client *c, zvRangeType type) {
     static char *events[] = {"zvremrangebyrank", "zvremrangebyscore", "zvremrangebylex"};
-    zvRangeSpec r = {.type = type, .count = -1};
+    zvRangeSpec r;
+    zvRangeSpecInit(&r, type, 0);
     robj *key = c->argv[1];
     robj *zobj;
 
@@ -1425,12 +1441,6 @@ static unsigned long zvSetOpSrcLen(zvSetOpSrc *src) {
     return zvsetLength(objectGetVal(src->subject));
 }
 
-/* Insert the accumulated vector for member into the temp result.
- * The temp object holds unique members, so this is insert-only. */
-static void zvSetOpResultInsert(zvset *res, const zvScore *vec, const char *member, size_t member_len) {
-    zvsetInsertNew(res, zvItemCreate(vec, member, member_len));
-}
-
 static void zvsetopGenericCommand(client *c, robj *dstkey, int numkeysIndex, int op, int cardinality_only) {
     long setnum = 0;
     int aggregate = ZV_AGGR_SUM;
@@ -1635,8 +1645,8 @@ static void zvsetopGenericCommand(client *c, robj *dstkey, int numkeysIndex, int
             if (driver == -1 || zvSetOpSrcLen(&src[i]) < zvSetOpSrcLen(&src[driver])) driver = i;
         }
         if (driver >= 0 && zvSetOpSrcLen(&src[driver]) > 0) {
-            tmp = zvsetCreateSized(dims, zvSetOpSrcLen(&src[driver]));
-            zvsetTryExpand(tmp, zvSetOpSrcLen(&src[driver]));
+            sds *items = zmalloc(sizeof(sds) * zvSetOpSrcLen(&src[driver]));
+            unsigned long count = 0;
             zvsetIterator iter;
             zvsetInitUnorderedIterator(&iter, objectGetVal(src[driver].subject));
             const_sds next;
@@ -1654,16 +1664,17 @@ static void zvsetopGenericCommand(client *c, robj *dstkey, int numkeysIndex, int
                     zvScoreApplyWeight(scratch_b, scratch_a, src[k].weight);
                     zvScoreAggregate(scratch_c, scratch_b, aggregate);
                 }
-                if (k == setnum) zvSetOpResultInsert(tmp, scratch_c, member, mlen);
+                if (k == setnum) items[count++] = zvItemCreate(scratch_c, member, mlen);
             }
             zvsetResetIterator(&iter);
-            zvsetCompactIfFits(tmp);
+            tmp = zvsetFromItems(dims, items, count);
+            zfree(items);
         }
     } else if (op == ZV_OP_DIFF && dims) {
         /* Members of the first input absent from every later input. */
         if (src[0].subject != NULL) {
-            tmp = zvsetCreateSized(dims, zvSetOpSrcLen(&src[0]));
-            zvsetTryExpand(tmp, zvSetOpSrcLen(&src[0]));
+            sds *items = zmalloc(sizeof(sds) * zvSetOpSrcLen(&src[0]));
+            unsigned long count = 0;
             zvsetIterator iter;
             zvsetInitUnorderedIterator(&iter, objectGetVal(src[0].subject));
             const_sds next;
@@ -1673,10 +1684,11 @@ static void zvsetopGenericCommand(client *c, robj *dstkey, int numkeysIndex, int
                     if (src[k].subject == NULL) continue;
                     if (zvsetFindItemMember(objectGetVal(src[k].subject), next)) break;
                 }
-                if (k == setnum) zvsetInsertNew(tmp, sdsdup(next));
+                if (k == setnum) items[count++] = sdsdup(next);
             }
             zvsetResetIterator(&iter);
-            zvsetCompactIfFits(tmp);
+            tmp = zvsetFromItems(dims, items, count);
+            zfree(items);
         }
     }
     if (tmp == NULL) tmp = zvsetCreate(dims ? dims : 1);

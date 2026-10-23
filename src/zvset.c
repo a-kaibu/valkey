@@ -340,20 +340,6 @@ static void zvsetConvertToBtree(zvset *zs) {
     zs->tree = tree;
 }
 
-static void zvsetConvertToCompact(zvset *zs) {
-    serverAssert(!zvsetIsCompact(zs));
-    unsigned long len = fbtreeLength(zs->tree);
-    sds *items = len ? zmalloc(sizeof(sds) * len) : NULL;
-    /* PopMin hands item ownership over, in order. */
-    for (unsigned long i = 0; i < len; i++) items[i] = fbtreePopMin(zs->tree);
-    hashtableRelease(zs->ht);
-    fbtreeFree(zs->tree);
-    zs->ht = NULL;
-    zs->tree = NULL;
-    zvCompactAdopt(zs, items, (uint32_t)len);
-    zfree(items);
-}
-
 zvset *zvsetCreate(uint8_t dimensions) {
     zvset *zs = zcalloc(sizeof(*zs));
     zs->dimensions = dimensions;
@@ -380,17 +366,6 @@ void zvsetRelease(zvset *zs) {
 
 const char *zvsetEncodingName(const zvset *zs) {
     return zvsetIsCompact(zs) ? "compact" : "btree";
-}
-
-void zvsetCompactIfFits(zvset *zs) {
-    if (zvsetIsCompact(zs) || !zvsetFitsCompact(fbtreeLength(zs->tree), 0)) return;
-    fbtreeIterator it;
-    fbtreeInitIterator(&it, zs->tree);
-    const_sds item;
-    while ((item = fbtreeNext(&it)) != NULL) {
-        if (!zvsetFitsCompact(0, zvItemMemberLen(item))) return;
-    }
-    zvsetConvertToCompact(zs);
 }
 
 int zvsetTryExpand(zvset *zs, unsigned long size) {
@@ -424,38 +399,100 @@ static int zvItemSdsCompare(const void *a, const void *b) {
     return sdscmp(*(const sds *)a, *(const sds *)b);
 }
 
-zvset *zvsetFromHashtable(uint8_t dimensions, hashtable *ht) {
-    zvset *zs = zvsetCreate(dimensions);
-    unsigned long len = hashtableSize(ht);
-    int compact = zvsetFitsCompact(len, 0);
-    sds *items = (compact && len) ? zmalloc(sizeof(sds) * len) : NULL;
-    if (compact) {
-        hashtableIterator iter;
-        hashtableInitIterator(&iter, ht, 0);
-        void *next;
-        unsigned long i = 0;
-        while (hashtableNext(&iter, &next)) {
-            if (!zvsetFitsCompact(0, zvItemMemberLen(next))) compact = 0;
-            items[i++] = next;
+typedef struct zvSortEntry {
+    uint64_t key; /* First score component, as an integer in item order. */
+    sds item;
+} zvSortEntry;
+
+/* Sort items of one dimension count into item order. An LSD radix sort on
+ * the first score component (whose sortable encoding orders like an
+ * unsigned integer) touches each item once; only runs that tie on it are
+ * compared in full. Much faster than qsort with sdscmp, which dereferences
+ * two random items per comparison. */
+static void zvSortItems(sds *items, unsigned long count) {
+    if (count < 64) {
+        qsort(items, count, sizeof(sds), zvItemSdsCompare);
+        return;
+    }
+    zvSortEntry *a = zmalloc(sizeof(zvSortEntry) * count);
+    zvSortEntry *b = zmalloc(sizeof(zvSortEntry) * count);
+    for (unsigned long i = 0; i < count; i++) {
+        uint64_t sortable;
+        memcpy(&sortable, items[i] + 1, sizeof(sortable));
+        a[i].key = ntohu64(sortable);
+        a[i].item = items[i];
+    }
+    for (int shift = 0; shift < 64; shift += 8) {
+        unsigned long counts[256] = {0};
+        for (unsigned long i = 0; i < count; i++) counts[(a[i].key >> shift) & 0xff]++;
+        /* Every key shares this byte: the pass would not move anything. */
+        if (counts[(a[0].key >> shift) & 0xff] == count) continue;
+        unsigned long pos = 0;
+        for (int d = 0; d < 256; d++) {
+            unsigned long n = counts[d];
+            counts[d] = pos;
+            pos += n;
         }
-        hashtableCleanupIterator(&iter);
+        for (unsigned long i = 0; i < count; i++) b[counts[(a[i].key >> shift) & 0xff]++] = a[i];
+        zvSortEntry *t = a;
+        a = b;
+        b = t;
+    }
+    for (unsigned long i = 0; i < count; i++) items[i] = a[i].item;
+    /* Order each run of equal first components by the full item. */
+    for (unsigned long i = 0; i < count;) {
+        unsigned long j = i + 1;
+        while (j < count && a[j].key == a[i].key) j++;
+        if (j - i > 1) qsort(items + i, j - i, sizeof(sds), zvItemSdsCompare);
+        i = j;
+    }
+    zfree(a);
+    zfree(b);
+}
+
+/* Build a set from count distinct items, taking ownership of them, in the
+ * encoding that fits. items may be in any order and is sorted in place.
+ * ht, when not NULL, indexes exactly these items and is reused. Inserting
+ * in order keeps the tree build sequential instead of a random insert per
+ * item. */
+static zvset *zvsetBuild(uint8_t dimensions, sds *items, unsigned long count, hashtable *ht) {
+    zvset *zs = zvsetCreate(dimensions);
+    zvSortItems(items, count);
+    int compact = zvsetFitsCompact(count, 0);
+    for (unsigned long i = 0; compact && i < count; i++) {
+        if (!zvsetFitsCompact(0, zvItemMemberLen(items[i]))) compact = 0;
     }
     if (compact) {
-        if (len) qsort(items, len, sizeof(sds), zvItemSdsCompare);
-        hashtableRelease(ht);
-        zvCompactAdopt(zs, items, (uint32_t)len);
-        zfree(items);
+        if (ht) hashtableRelease(ht);
+        zvCompactAdopt(zs, items, (uint32_t)count);
         return zs;
     }
-    zfree(items);
-    /* Keep the hashtable: only the tree needs building. */
+    if (ht == NULL) {
+        ht = hashtableCreate(&zvsetHashtableType);
+        hashtableExpand(ht, count);
+        for (unsigned long i = 0; i < count; i++) serverAssert(hashtableAdd(ht, items[i]));
+    }
     zs->ht = ht;
     zs->tree = fbtreeCreate();
+    for (unsigned long i = 0; i < count; i++) serverAssert(fbtreeInsert(zs->tree, items[i]) == items[i]);
+    return zs;
+}
+
+zvset *zvsetFromItems(uint8_t dimensions, sds *items, unsigned long count) {
+    return zvsetBuild(dimensions, items, count, NULL);
+}
+
+zvset *zvsetFromHashtable(uint8_t dimensions, hashtable *ht) {
+    unsigned long len = hashtableSize(ht);
+    sds *items = zmalloc(sizeof(sds) * (len ? len : 1));
     hashtableIterator iter;
     hashtableInitIterator(&iter, ht, 0);
     void *next;
-    while (hashtableNext(&iter, &next)) serverAssert(fbtreeInsert(zs->tree, next) == next);
+    unsigned long i = 0;
+    while (hashtableNext(&iter, &next)) items[i++] = next;
     hashtableCleanupIterator(&iter);
+    zvset *zs = zvsetBuild(dimensions, items, len, ht);
+    zfree(items);
     return zs;
 }
 
@@ -744,37 +781,36 @@ sds zvLexSeekKey(zvset *zs, const char *member, size_t member_len) {
     return key;
 }
 
+/* Stack storage for one BYSCORE seek key: an sds holding at most a full
+ * encoded prefix, so resolving a range allocates nothing. */
+#define ZV_SEEK_KEY_SIZE (sizeof(struct sdshdr16) + 1 + 8 * ZVSET_MAX_DIMENSIONS + 1)
+
+/* Write the encoded prefix of values (or its successor) into storage as an
+ * sds. Returns NULL when the successor does not exist. */
+static sds zvSeekKey(char *storage, const double *values, uint8_t dims, int successor) {
+    sds key = sdswrite(storage, ZV_SEEK_KEY_SIZE, SDS_TYPE_16, SDS_NOINIT, 1 + (size_t)dims * 8);
+    size_t len = zvEncodePrefix(values, dims, key);
+    if (successor && (len = zvSuccessorInPlace(key, len)) == 0) return NULL;
+    sdssetlen(key, len);
+    return key;
+}
+
 /* Build the BYSCORE seek keys for [minb,maxb] (already fitted to the
- * key's dimensions): items in range are those >= *lower and < *upper.
- * NULL means unbounded. Returns 0 when the range is trivially empty.
- * Caller frees *lower and *upper. */
-static int zvBuildScoreInterval(const zvScoreBound *minb, const zvScoreBound *maxb, sds *lower, sds *upper) {
+ * key's dimensions) in lower_buf and upper_buf (ZV_SEEK_KEY_SIZE bytes
+ * each): items in range are those >= *lower and < *upper. NULL means
+ * unbounded. Returns 0 when the range is trivially empty. */
+static int zvBuildScoreInterval(const zvScoreBound *minb, const zvScoreBound *maxb, char *lower_buf, char *upper_buf, sds *lower, sds *upper) {
     *lower = NULL;
     *upper = NULL;
     /* Reversed infinities ("+" as min or "-" as max) are empty, never
      * a full range. */
     if (minb->pos_inf || maxb->neg_inf) return 0;
-    char buf[1 + 8 * ZVSET_MAX_DIMENSIONS];
-    if (minb->len) {
-        size_t len = zvEncodePrefix(minb->values, minb->len, buf);
-        /* Exclusive: skip every member with exactly this score. */
-        if (minb->exclusive && (len = zvSuccessorInPlace(buf, len)) == 0) return 0;
-        *lower = sdsnewlen(buf, len);
-    }
-    if (maxb->len) {
-        size_t len = zvEncodePrefix(maxb->values, maxb->len, buf);
-        /* Inclusive: end after every member with exactly this score. An
-         * all-0xFF prefix has no successor and covers everything above. */
-        if (!maxb->exclusive) len = zvSuccessorInPlace(buf, len);
-        if (len) *upper = sdsnewlen(buf, len);
-    }
-    if (*lower && *upper && sdscmp(*lower, *upper) >= 0) {
-        sdsfree(*lower);
-        sdsfree(*upper);
-        *lower = *upper = NULL;
-        return 0;
-    }
-    return 1;
+    /* Exclusive lower: skip every member with exactly this score. */
+    if (minb->len && (*lower = zvSeekKey(lower_buf, minb->values, minb->len, minb->exclusive)) == NULL) return 0;
+    /* Inclusive upper: end after every member with exactly this score. An
+     * all-0xFF prefix has no successor and covers everything above. */
+    if (maxb->len) *upper = zvSeekKey(upper_buf, maxb->values, maxb->len, !maxb->exclusive);
+    return !(*lower && *upper && sdscmp(*lower, *upper) >= 0);
 }
 
 /* Build [lower,upper) seek keys for uniform-vector BYLEX. Member bounds
@@ -825,11 +861,10 @@ static int zvBuildLexInterval(zvset *zs, zvLexBound *minb, zvLexBound *maxb, sds
 int zvsetScoreRangeToRanks(zvset *zs, zvScoreBound *minb, zvScoreBound *maxb, unsigned long *lo, unsigned long *hi) {
     if (zvScoreBoundFit(minb, zs->dimensions) != C_OK || zvScoreBoundFit(maxb, zs->dimensions) != C_OK)
         return C_ERR;
+    char lower_buf[ZV_SEEK_KEY_SIZE], upper_buf[ZV_SEEK_KEY_SIZE];
     sds lower, upper;
     *lo = *hi = 0;
-    if (zvBuildScoreInterval(minb, maxb, &lower, &upper)) zvScoreRanks(zs, lower, upper, lo, hi);
-    sdsfree(lower);
-    sdsfree(upper);
+    if (zvBuildScoreInterval(minb, maxb, lower_buf, upper_buf, &lower, &upper)) zvScoreRanks(zs, lower, upper, lo, hi);
     return C_OK;
 }
 
@@ -837,20 +872,13 @@ int zvsetScoreRangeToRanks(zvset *zs, zvScoreBound *minb, zvScoreBound *maxb, un
  * fit the key's dimensions. A bounded range is counted in one descent. */
 long zvsetScoreRangeCount(zvset *zs, zvScoreBound *minb, zvScoreBound *maxb) {
     if (zvScoreBoundFit(minb, zs->dimensions) != C_OK || zvScoreBoundFit(maxb, zs->dimensions) != C_OK) return -1;
+    char lower_buf[ZV_SEEK_KEY_SIZE], upper_buf[ZV_SEEK_KEY_SIZE];
     sds lower, upper;
-    unsigned long count = 0;
-    if (zvBuildScoreInterval(minb, maxb, &lower, &upper)) {
-        if (lower && upper && !zvsetIsCompact(zs)) {
-            count = fbtreeCountRangeByValue(zs->tree, lower, upper, 0, 1);
-        } else {
-            unsigned long lo, hi;
-            zvScoreRanks(zs, lower, upper, &lo, &hi);
-            count = hi - lo;
-        }
-    }
-    sdsfree(lower);
-    sdsfree(upper);
-    return (long)count;
+    if (!zvBuildScoreInterval(minb, maxb, lower_buf, upper_buf, &lower, &upper)) return 0;
+    if (lower && upper && !zvsetIsCompact(zs)) return (long)fbtreeCountRangeByValue(zs->tree, lower, upper, 0, 1);
+    unsigned long lo, hi;
+    zvScoreRanks(zs, lower, upper, &lo, &hi);
+    return (long)(hi - lo);
 }
 
 /* Resolve a BYLEX [min,max] range to half-open ranks [*lo,*hi). The
@@ -879,20 +907,16 @@ int zvsetLexRangeToRanks(zvset *zs, const char *min, size_t minlen, const char *
 /* Rank a score would take if inserted: before every equal score
  * (forward) or after every equal score (reverse, counted from the top). */
 unsigned long zvsetRankByScore(zvset *zs, const zvScore *score, int reverse) {
-    char buf[1 + 8 * ZVSET_MAX_DIMENSIONS];
-    size_t len = zvEncodePrefix(score->values, score->len, buf);
+    char buf[ZV_SEEK_KEY_SIZE];
     unsigned long lo, hi;
     if (!reverse) {
-        sds prefix = sdsnewlen(buf, len);
-        zvScoreRanks(zs, NULL, prefix, &lo, &hi);
-        sdsfree(prefix);
+        zvScoreRanks(zs, NULL, zvSeekKey(buf, score->values, score->len, 0), &lo, &hi);
         return hi;
     }
     /* An all-0xFF prefix has no successor: nothing ranks above it. */
-    if ((len = zvSuccessorInPlace(buf, len)) == 0) return 0;
-    sds succ = sdsnewlen(buf, len);
+    sds succ = zvSeekKey(buf, score->values, score->len, 1);
+    if (succ == NULL) return 0;
     zvScoreRanks(zs, succ, NULL, &lo, &hi);
-    sdsfree(succ);
     return hi - lo;
 }
 

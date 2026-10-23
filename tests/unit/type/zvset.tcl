@@ -1306,6 +1306,40 @@ start_server {tags {"zvset-encoding needs:debug"}} {
         r config set zset-max-listpack-entries 128
     }
 
+    test "ZVSET STORE results built in bulk keep vector order" {
+        # Enough members for the radix sort, with many ties on the first
+        # component (including infinities and negatives) and on the full
+        # vector, so ties fall back to the second component and the member.
+        r del a{t} b{t} dst{t}
+        set firsts {-inf -1.5 0 2 inf}
+        set ref_a {}
+        set ref_b {}
+        for {set i 0} {$i < 400} {incr i} {
+            set v [list [lindex $firsts [expr {$i % 5}]] [expr {($i * 37) % 11 - 5}]]
+            r zvadd a{t} [join $v #] m$i
+            dict set ref_a m$i $v
+            if {$i % 2} {
+                r zvadd b{t} 1#1 m$i
+                dict set ref_b m$i {1 1}
+            }
+        }
+        assert_equal 400 [r zvunionstore dst{t} 2 a{t} b{t} aggregate min]
+        assert_encoding btree dst{t}
+        set ref_min {}
+        dict for {m v} $ref_a {
+            if {[dict exists $ref_b $m] && [zv_compare [concat x {1 1}] [concat x $v]] < 0} {
+                dict set ref_min $m {1 1}
+            } else {
+                dict set ref_min $m $v
+            }
+        }
+        zv_check dst{t} $ref_min
+        assert_equal 200 [r zvdiffstore dst{t} 2 a{t} b{t}]
+        zv_check dst{t} [dict filter $ref_a script {m v} {expr {![dict exists $ref_b $m]}}]
+        assert_equal 200 [r zvinterstore dst{t} 2 a{t} b{t} weights 1 0]
+        zv_check dst{t} [dict filter $ref_a script {m v} {dict exists $ref_b $m}]
+    }
+
     test "ZVSET encodings survive DEBUG RELOAD and COPY" {
         r config set zset-max-listpack-entries 4
         r del small{t} large{t} c1{t} c2{t}
