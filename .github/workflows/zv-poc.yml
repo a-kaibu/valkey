@@ -147,6 +147,9 @@ jobs:
               ratio = f"{b / h:.2f}x" if h > 0 else "n/a"
               print(f"| {case} | {b:.3f} | {h:.3f} | {ratio} |")
           PY
+          # Also as an annotation: readable through the checks API where
+          # job logs and artifacts are not.
+          python3 -c 'import sys; t = open("/tmp/ab-summary.md").read(); print("::notice title=zv-ab summary::" + t.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))'
       - name: Upload A/B results
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
