@@ -109,10 +109,12 @@ jobs:
           for round in 1 2 3; do
             for side in base head; do
               /tmp/valkey-server-$side --port 7790 --daemonize yes --save '' --appendonly no --logfile /tmp/ab-$side.log
-              until ./src/valkey-cli -p 7790 ping 2>/dev/null | grep -q PONG; do sleep 0.2; done
-              tclsh utils/zv_cpu_benchmark.tcl --port 7790 --n 30000 --dims 16 --repeats 5 > /tmp/ab-$side-$round.tsv
+              # Bounded waits: a server that fails to start or stop, or a
+              # benchmark that stalls, fails the job instead of hanging it.
+              timeout 30 bash -c 'until ./src/valkey-cli -p 7790 ping 2>/dev/null | grep -q PONG; do sleep 0.2; done'
+              timeout 600 tclsh utils/zv_cpu_benchmark.tcl --port 7790 --n 30000 --dims 16 --repeats 5 > /tmp/ab-$side-$round.tsv
               ./src/valkey-cli -p 7790 SHUTDOWN NOSAVE || true
-              while ./src/valkey-cli -p 7790 ping >/dev/null 2>&1; do sleep 0.2; done
+              timeout 30 bash -c 'while ./src/valkey-cli -p 7790 ping >/dev/null 2>&1; do sleep 0.2; done'
             done
           done
       - name: Summarize A/B

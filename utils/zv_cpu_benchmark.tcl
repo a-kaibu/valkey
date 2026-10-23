@@ -160,5 +160,17 @@ foreach aggregate {SUM MIN MAX} {
 measure $fd interstore [list ZVINTERSTORE $prefix:dst 4 {*}[lrange $keys 0 3]] 5 $opt(repeats)
 measure $fd intercard [list ZVINTERCARD 4 {*}[lrange $keys 0 3]] 5 $opt(repeats)
 measure $fd diffstore [list ZVDIFFSTORE $prefix:dst 2 {*}[lrange $keys 0 1]] 5 $opt(repeats)
-zvbench::req $fd DEL {*}$keys
+# A small key (64 members) exercises the compact encoding.
+set small $prefix:small
+zvbench::req $fd DEL $small
+for {set m 0} {$m < 64} {incr m} {
+    zvbench::req $fd ZVADD $small [zvbench::genvec $m $opt(dims) 0 rand_uniform] [zvbench::member $m]
+}
+measure $fd small-score [list ZVSCORE $small [zvbench::member 63]] 1000 $opt(repeats)
+measure $fd small-rank [list ZVRANK $small [zvbench::member 63]] 1000 $opt(repeats)
+measure $fd small-range-scores [list ZVRANGE $small 0 -1 WITHSCORES] 100 $opt(repeats)
+measure $fd small-count [list ZVCOUNT $small $lo $hi] 1000 $opt(repeats)
+set one [join [lrepeat $opt(dims) 1] #]
+measure $fd small-incrby [list ZVINCRBY $small $one [zvbench::member 63]] 1000 $opt(repeats)
+zvbench::req $fd DEL {*}$keys $small
 close $fd
